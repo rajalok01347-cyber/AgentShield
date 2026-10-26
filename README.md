@@ -2,7 +2,7 @@
 
 A FastAPI security gateway between AI agents and simulated tools.
 
-## Current milestone: sessions and ordered policies
+## Current milestone: session attack detector rules
 
 Implemented and tested: agent API-key authentication, per-run sessions, ordered SQLite policies, sandbox reads/deletes,
 approval-gated sandbox email, input validation, an admin outbox, and hash-linked audit events.
@@ -100,7 +100,7 @@ Choose `reject` instead to prevent execution.
 .\.venv\Scripts\python.exe -m unittest -v test_backend
 ```
 
-The 32 tests use separate temporary databases. They cover authentication, validation,
+The 43 tests use separate temporary databases. They cover authentication, validation,
 read isolation, missing files, blocked deletion, sandbox deletion, approval/rejection,
 concurrent approvals, attack detection, demo comparison, and audit tampering.
 
@@ -128,6 +128,9 @@ its email in the dashboard. The runner uses the existing `httpx` dependency.
 
 - `app.py`: authentication, session storage, approvals, API routes, migration, and audit chain
 - `policy.py`: ordered policy evaluation and condition validation
+- `detector.py`: output scanning, outbound secret checks, and session burst limits
+- `test_detector.py`: detector integration and boundary tests
+- `DETECTOR_RULES.md`: rule definitions, configuration, and verification steps
 - `test_sessions_policy.py`: policy, session isolation, and migration tests
 - `PRD.md`: supplied target specification
 - `SESSIONS_POLICIES.md`: session and policy API guide
@@ -144,8 +147,9 @@ its email in the dashboard. The runner uses the existing `httpx` dependency.
 - All file operations are database-only and scoped to the agent identity.
 - Agent policies are stored in SQLite. The current startup seeds one demo agent.
 - `GET /api/state` exposes requests and events to the admin key only.
-- Attack detection is a narrow demonstration rule based on reading `untrusted.txt`;
-  it is not a general prompt-injection detector.
+- Attack detection uses session taint, injection-phrase scanning, destructive-call burst
+  limits, and outbound secret patterns. See [DETECTOR_RULES.md](DETECTOR_RULES.md) for
+  triggers, configuration, known false positives, and limits.
 - `POST /api/demo` is admin-only; `{"shield":false}` bypasses policy only for a
   fresh simulated demo identity. It cannot operate on real files or email.
 - `POST /api/demo/tamper` intentionally corrupts the local audit log for demonstrations.
@@ -153,8 +157,8 @@ its email in the dashboard. The runner uses the existing `httpx` dependency.
 - The local checkpoint can detect a removed log tail, but an attacker who controls
   both the database and checkpoint can rewrite history. It is not an external trust anchor.
 - The checkpoint file and SQLite commit are not one atomic transaction. Crashes can
-  cause verification to fail. Failed validation/authentication and tool errors are not
-  yet included in the audit chain.
+  cause verification to fail. Failed validation/authentication is not
+  yet included in the audit chain; sandbox-tool failures are recorded.
 - This is a local, single-process teaching prototype. Production hardening,
   live Gemini verification, and multi-agent provisioning remain future work.
 

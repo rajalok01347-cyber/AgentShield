@@ -90,10 +90,12 @@ the admin assignment endpoint. Restarting does not overwrite edited policies or 
 
 ## Verification and remaining work
 
-32 tests cover the existing app, Gemini contract, policies, session isolation, approval-time
+43 tests cover the existing app, Gemini contract, policies, session isolation, approval-time
 rechecks, and migration across repeated startups. The live browser check demonstrated that
 an external email is blocked in a tainted session and pending in a fresh session.
 
-This milestone does not finish the PRD. The remaining detector rules, complete sandbox toolset,
+This milestone does not finish the PRD. The complete sandbox toolset,
 full `/v1` API contract, record/replay cache, timeout expiry behavior, and final security docs/demo
 rehearsals are still pending. Live Gemini connectivity still requires the user's local key.
+
+The detector milestone is now implemented; see [DETECTOR_RULES.md](DETECTOR_RULES.md).

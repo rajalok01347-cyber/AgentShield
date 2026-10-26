@@ -8,7 +8,8 @@ import re
 from contextlib import contextmanager
 from sandbox import execute
 from pydantic import BaseModel, Field, ConfigDict, model_validator
-from policy import Policy, DEFAULT_POLICY, evaluate, outbound_domains, email_domain
+from policy import Policy, DEFAULT_POLICY, evaluate
+from detector import inspect_action, inspect_result, record_attempt, BURST_LIMIT, BURST_WINDOW
 ROOT = Path(__file__).parent
 DATA = Path(os.getenv('AGENTSHIELD_DATA', str(ROOT / 'data')))
 DATA.mkdir(parents=True, exist_ok=True)
@@ -38,6 +39,10 @@ with db() as c:
         c.execute('ALTER TABLE agents ADD COLUMN policy_id TEXT')
     if 'session_id' not in [r['name'] for r in c.execute('PRAGMA table_info(requests)')]:
         c.execute('ALTER TABLE requests ADD COLUMN session_id TEXT')
+    c.execute('CREATE TABLE IF NOT EXISTS destructive_attempts(id INTEGER PRIMARY KEY,session_id TEXT NOT NULL,tool TEXT NOT NULL,created_at REAL NOT NULL)')
+    c.execute('CREATE INDEX IF NOT EXISTS idx_attempt_session_time ON destructive_attempts(session_id,created_at)')
+    if 'detector_rule' not in [r['name'] for r in c.execute('PRAGMA table_info(requests)')]:
+        c.execute('ALTER TABLE requests ADD COLUMN detector_rule TEXT')
     c.execute('INSERT OR IGNORE INTO policies VALUES(?,?,?)', ('default-assistant', DEFAULT_POLICY.name, DEFAULT_POLICY.model_dump_json()))
     for old in c.execute('SELECT * FROM agents WHERE policy_id IS NULL').fetchall():
         old_policy = json.loads(old['policy'])
@@ -125,11 +130,19 @@ def load_policy(c, who):
         raise HTTPException(403, 'Agent has no valid assigned policy')
     return Policy.model_validate_json(row['rules_json'])
 
-def decide(policy, session, action):
+def decide(c, policy, session, action):
     mode, reason = evaluate(policy, action.tool, action.args)
-    if session['tainted'] and action.tool == 'send_email' and (email_domain(action.args.get('to')) not in outbound_domains(policy)):
-        return ('block', 'Taint → exfiltration: untrusted content read, external recipient')
-    return (mode, reason)
+    finding = inspect_action(c, policy, session, action)
+    if finding:
+        return ('block', finding.reason, finding.rule)
+    return (mode, reason, None)
+
+def observe_result(c, who, sid, rid, result):
+    finding = inspect_result(result)
+    if finding:
+        c.execute('UPDATE sessions SET tainted=1 WHERE id=?', (sid,))
+        log(c, 'detector_flag', request_id=rid, agent=who, session_id=sid, detector_rule=finding.rule, reason=finding.reason)
+    return finding.rule if finding else None
 
 def submit(who, a, shield=True, policy_override=None):
     if not a.session_id:
@@ -137,17 +150,26 @@ def submit(who, a, shield=True, policy_override=None):
     with LOCK, db() as c:
         session = session_for(c, a.session_id, who)
         policy = policy_override or load_policy(c, who)
-        mode, reason = decide(policy, session, a) if shield else ('allow', 'Shield OFF: sandbox only')
+        record_attempt(c, a.session_id, a.tool)
+        mode, reason, detector_rule = decide(c, policy, session, a) if shield else ('allow', 'Shield OFF: sandbox only', None)
         status = {'allow': 'executed', 'block': 'blocked', 'approve': 'pending'}[mode]
         rid = secrets.token_hex(8)
-        log(c, 'action', request_id=rid, agent=who, session_id=a.session_id, tool=a.tool, args=a.args, status=status, reason=reason)
-        result = execute(c, who, a) if mode == 'allow' else None
-        if a.tool == 'read_file' and result and result.get('untrusted'):
-            c.execute('UPDATE sessions SET tainted=1 WHERE id=?', (a.session_id,))
-        c.execute('INSERT INTO requests(id,agent,tool,args,status,reason,result,session_id) VALUES(?,?,?,?,?,?,?,?)', (rid, who, a.tool, json.dumps(a.args), status, reason, json.dumps(result), a.session_id))
+        log(c, 'action', request_id=rid, agent=who, session_id=a.session_id, tool=a.tool, args=a.args, status='allowed' if mode == 'allow' else status, decision=mode, reason=reason, detector_rule=detector_rule)
+        error = None
+        try:
+            result = execute(c, who, a) if mode == 'allow' else None
+        except HTTPException as exc:
+            error = exc
+            status = 'error'
+            result = {'error': exc.detail}
+            log(c, 'tool_error', request_id=rid, agent=who, session_id=a.session_id, tool=a.tool, status=status, http_status=exc.status_code)
+        flag = observe_result(c, who, a.session_id, rid, result) if result else None
+        c.execute('INSERT INTO requests(id,agent,tool,args,status,reason,result,session_id,detector_rule) VALUES(?,?,?,?,?,?,?,?,?)', (rid, who, a.tool, json.dumps(a.args), status, reason, json.dumps(result), a.session_id, detector_rule))
         c.commit()
         checkpoint(c)
-    return {'id': rid, 'session_id': a.session_id, 'status': status, 'reason': reason, 'result': result}
+    if error:
+        raise error
+    return {'id': rid, 'session_id': a.session_id, 'status': status, 'reason': reason, 'result': result, 'detector_rule': detector_rule, 'session_flag': flag}
 
 @app.get('/')
 def index():
@@ -178,12 +200,12 @@ def action_status(rid: str, identity=Depends(agent)):
         row = c.execute('SELECT * FROM requests WHERE id=? AND agent=?', (rid, identity['id'])).fetchone()
     if row is None:
         raise HTTPException(404, 'Request not found')
-    return {'id': row['id'], 'session_id': row['session_id'], 'status': row['status'], 'reason': row['reason'], 'result': json.loads(row['result'])}
+    return {'id': row['id'], 'session_id': row['session_id'], 'status': row['status'], 'reason': row['reason'], 'result': json.loads(row['result']), 'detector_rule': row['detector_rule']}
 
 @app.get('/api/state', dependencies=[Depends(admin)])
 def state():
     with db() as c:
-        return {'requests': [dict(r) for r in c.execute('SELECT * FROM requests ORDER BY rowid DESC')], 'events': [dict(r) for r in c.execute('SELECT * FROM events ORDER BY seq DESC')], 'agents': [{'id': r['id'], 'policy_id': r['policy_id']} for r in c.execute('SELECT * FROM agents')], 'sessions': [dict(r) for r in c.execute('SELECT * FROM sessions ORDER BY started_at DESC')], 'policies': [{'id': r['id'], **json.loads(r['rules_json'])} for r in c.execute('SELECT * FROM policies')]}
+        return {'detector': {'burst_limit': BURST_LIMIT, 'burst_window': BURST_WINDOW}, 'requests': [dict(r) for r in c.execute('SELECT * FROM requests ORDER BY rowid DESC')], 'events': [dict(r) for r in c.execute('SELECT * FROM events ORDER BY seq DESC')], 'agents': [{'id': r['id'], 'policy_id': r['policy_id']} for r in c.execute('SELECT * FROM agents')], 'sessions': [dict(r) for r in c.execute('SELECT * FROM sessions ORDER BY started_at DESC')], 'policies': [{'id': r['id'], **json.loads(r['rules_json'])} for r in c.execute('SELECT * FROM policies')]}
 
 @app.post('/api/approvals/{rid}/{decision}', dependencies=[Depends(admin)])
 def approve(rid: str, decision: Literal['approve', 'reject']):
@@ -194,16 +216,18 @@ def approve(rid: str, decision: Literal['approve', 'reject']):
         if r['status'] != 'pending':
             raise HTTPException(409, 'Request already resolved')
         action = Action(session_id=r['session_id'], tool=r['tool'], args=json.loads(r['args']))
-        mode, reason = decide(load_policy(c, r['agent']), session_for(c, r['session_id'], r['agent']), action)
+        mode, reason, detector_rule = decide(c, load_policy(c, r['agent']), session_for(c, r['session_id'], r['agent']), action)
         status = 'rejected' if decision == 'reject' else 'blocked' if mode == 'block' else 'executed'
         result = execute(c, r['agent'], action) if status == 'executed' else None
+        if result:
+            observe_result(c, r['agent'], r['session_id'], rid, result)
         if status == 'blocked':
-            c.execute('UPDATE requests SET reason=? WHERE id=?', (reason, rid))
+            c.execute('UPDATE requests SET reason=?,detector_rule=? WHERE id=?', (reason, detector_rule, rid))
         c.execute('UPDATE requests SET status=?,result=? WHERE id=?', (status, json.dumps(result), rid))
-        log(c, 'human_decision', request_id=rid, session_id=r['session_id'], decision=decision, status=status, reason=reason)
+        log(c, 'human_decision', request_id=rid, session_id=r['session_id'], decision=decision, status=status, reason=reason, detector_rule=detector_rule)
         c.commit()
         checkpoint(c)
-    return {'status': status, 'result': result}
+    return {'status': status, 'result': result, 'reason': reason, 'detector_rule': detector_rule}
 
 @app.get('/api/verify', dependencies=[Depends(admin)])
 def verify():

@@ -18,7 +18,7 @@ class BackendTests(unittest.TestCase):
         self.agent = {'x-api-key': 'test-agent-key'}
         self.admin = {'x-admin-key': 'test-admin-key'}
         with app.db() as c:
-            for table in ('requests', 'events', 'outbox', 'sessions'):
+            for table in ('requests', 'events', 'outbox', 'sessions', 'destructive_attempts'):
                 c.execute('DELETE FROM '+table)
             c.execute("DELETE FROM files WHERE agent!='demo-agent'")
             c.execute("DELETE FROM agents WHERE id!='demo-agent'")
