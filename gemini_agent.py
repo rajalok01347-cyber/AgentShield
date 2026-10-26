@@ -4,6 +4,9 @@ import getpass
 import os
 import re
 import time
+from pathlib import Path
+from contextlib import ExitStack
+from llm_cache import LLMCache, CachedModel, CacheError
 
 import httpx
 
@@ -80,6 +83,17 @@ def request(gateway, method, path, key, **kwargs):
     return response.json()
 
 
+def model_outcome(outcome,tool):
+    # Operational IDs stay in the runner/dashboard; Gemini gets stable semantic results.
+    value={key:outcome[key] for key in ('status','reason','result','detector_rule','session_flag','http_status') if key in outcome}
+    if isinstance(value.get('result'),dict):
+        value['result']=dict(value['result'])
+        volatile={'send_email':('message_id','sent_at'),'delete_file':('trash_id',)}.get(tool,())
+        for key in volatile:
+            value['result'].pop(key,None)
+    return value
+
+
 def run_agent(task, model, gateway, agent_key, *, max_rounds=12, max_tools=24,
               approval_timeout=300, poll_interval=2, report=print,
               clock=time.monotonic, sleep=time.sleep):
@@ -124,7 +138,7 @@ def run_agent(task, model, gateway, agent_key, *, max_rounds=12, max_tools=24,
                     sleep(min(poll_interval, remaining))
                     outcome = request(gateway, 'GET', '/api/actions/' + rid, agent_key)
                 report('Human decision: ' + outcome['status'])
-            result = {'name': call['name'], 'response': outcome}
+            result = {'name':call['name'],'response':model_outcome(outcome,call['name'])}
             if 'id' in call:
                 result['id'] = call['id']
             results.append({'functionResponse': result})
@@ -137,23 +151,33 @@ def main():
     parser.add_argument('task', nargs='?', default='Read report.txt and email a short summary to manager@acme.example.')
     parser.add_argument('--model', default=os.getenv('GEMINI_MODEL', 'gemini-flash-latest'))
     parser.add_argument('--approval-timeout', type=int, default=300)
+    parser.add_argument('--llm-mode',choices=['live','record','replay'],default=os.getenv('LLM_MODE','live'))
+    parser.add_argument('--cache-db',default=os.getenv('LLM_CACHE_PATH',str(Path(os.getenv('AGENTSHIELD_DATA',str(Path(__file__).parent/'data')))/'shield.db')))
     options = parser.parse_args()
+    if options.llm_mode not in ('live','record','replay'):
+        parser.error('LLM_MODE must be live, record, or replay')
     if not 1 <= options.approval_timeout <= 3600:
         parser.error('--approval-timeout must be between 1 and 3600 seconds')
-    gemini_key = os.getenv('GEMINI_API_KEY') or getpass.getpass('Gemini API key (hidden): ')
+    gemini_key = '' if options.llm_mode=='replay' else (os.getenv('GEMINI_API_KEY') or getpass.getpass('Gemini API key (hidden): '))
     agent_key = os.getenv('AGENTSHIELD_AGENT_KEY') or getpass.getpass('AgentShield Agent key (hidden): ')
-    if not gemini_key.strip() or not agent_key.strip():
+    if (options.llm_mode!='replay' and not gemini_key.strip()) or not agent_key.strip():
         parser.error('Both keys are required.')
-    print('Tool results and your task will be sent to Google Gemini. Use sandbox data only.')
+    print('LLM mode: '+options.llm_mode)
+    print('Agent responses are replayed; security decisions are live.' if options.llm_mode=='replay' else 'Tool results and your task will be sent to Google Gemini. Use sandbox data only.')
     print('Review pending actions at http://localhost:8000/ .')
     try:
-        # Separate clients prevent the Gemini credential reaching the gateway or vice versa.
-        with httpx.Client(timeout=60, follow_redirects=False) as google, httpx.Client(
-                base_url='http://127.0.0.1:8000', timeout=15, follow_redirects=False, trust_env=False) as gateway:
-            request(gateway, 'GET', '/api/agent', agent_key)
-            run_agent(options.task, Gemini(google, gemini_key.strip(), options.model), gateway,
-                      agent_key.strip(), approval_timeout=options.approval_timeout)
-    except (AgentError, KeyboardInterrupt) as error:
+        # Replay never constructs a provider client. Credentials stay in separate clients.
+        with ExitStack() as stack:
+            gateway=stack.enter_context(httpx.Client(base_url='http://127.0.0.1:8000',timeout=15,follow_redirects=False,trust_env=False))
+            request(gateway,'GET','/api/agent',agent_key)
+            provider=None
+            if options.llm_mode!='replay':
+                google=stack.enter_context(httpx.Client(timeout=60,follow_redirects=False))
+                provider=Gemini(google,gemini_key.strip(),options.model)
+            cache=None if options.llm_mode=='live' else LLMCache(options.cache_db)
+            model=CachedModel(provider,cache,options.llm_mode,options.model,SYSTEM,TOOLS)
+            run_agent(options.task,model,gateway,agent_key.strip(),approval_timeout=options.approval_timeout)
+    except (AgentError,CacheError,OSError,KeyboardInterrupt) as error:
         print('Stopped: ' + (str(error) or 'Interrupted. Pending requests remain available in the dashboard.'))
         return 1
     return 0

@@ -124,7 +124,7 @@ unknown; the dashboard labels those as legacy messages.
 - Overwrites and deletes count toward the destructive burst rule; creating a new file does
   not. Pending writes are reclassified at approval, without counting the same request twice.
 
-The test suite runs 58 cases: 57 pass and one real-symlink test is skipped because the
+The test suite now runs 70 cases: 69 pass and one real-symlink test is skipped because the
 current Windows session lacks symlink-creation privileges. Symlink/reparse rejection is
 covered with mocked filesystem metadata. Tests cover traversal, isolation, nested writes,
 trash restore/conflicts, canned commands, migration, persistence, approvals, and detectors.

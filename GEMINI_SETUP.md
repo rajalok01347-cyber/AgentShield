@@ -93,7 +93,7 @@ The dashboard's scripted ON/OFF demo remains the deterministic attack demonstrat
 .\.venv\Scripts\python.exe -m unittest discover -p "test_*.py" -v
 ```
 
-58 test cases cover the backend and offline Gemini integration. Gemini responses are mocked;
+70 test cases cover the backend and offline Gemini integration. Gemini responses are mocked;
 the gateway, authentication, approval state, and sandbox operations use the real application.
 Tests check ID/signature preservation, multiple calls, approval/rejection, timeout,
 agent-scoped status, limits, and sanitized API errors.
@@ -118,3 +118,7 @@ agent-scoped status, limits, and sanitized API errors.
 
 - [Gemini function calling](https://ai.google.dev/gemini-api/docs/generate-content/function-calling)
 - [Gemini API keys](https://ai.google.dev/gemini-api/docs/api-key)
+
+## Record and replay
+
+The agent now supports `LLM_MODE=live|record|replay` and `--llm-mode`. Replay skips the Gemini key prompt and never contacts Google. Follow [LLM_CACHE.md](LLM_CACHE.md) for complete instructions and state requirements.

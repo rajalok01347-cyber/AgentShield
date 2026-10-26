@@ -2,7 +2,7 @@
 
 A FastAPI security gateway between AI agents and simulated tools.
 
-## Current milestone: full sandbox toolset
+## Current milestone: LLM record/replay cache
 
 Implemented and tested: agent API-key authentication, per-run sessions, ordered SQLite policies, sandbox list/read/write/trash operations and canned commands,
 approval-gated sandbox email, input validation, an admin outbox, and hash-linked audit events.
@@ -100,7 +100,7 @@ Choose `reject` instead to prevent execution.
 .\.venv\Scripts\python.exe -m unittest -v test_backend
 ```
 
-The suite has 58 cases (57 pass, one host-dependent symlink case skipped), using temporary databases and sandbox folders. They cover authentication, validation,
+The suite has 70 cases (69 pass, one host-dependent symlink case skipped), using temporary databases and sandbox folders. They cover authentication, validation,
 read isolation, missing files, blocked deletion, sandbox deletion, approval/rejection,
 concurrent approvals, attack detection, demo comparison, and audit tampering.
 
@@ -123,6 +123,10 @@ flowchart LR
 
 All six PRD tools are available. Follow [SANDBOX_TOOLS.md](SANDBOX_TOOLS.md) for file listing/writing, trash recovery, email subjects, and command simulation.
 
+## LLM record/replay
+
+Set `LLM_MODE=live`, `record`, or `replay`. Only Gemini responses are cached; all gateway actions remain live. Follow [LLM_CACHE.md](LLM_CACHE.md) for recording, replay, cache misses, and approval rehearsal.
+
 ## Gemini agent
 
 Follow [GEMINI_SETUP.md](GEMINI_SETUP.md) to connect Gemini, run a task, and approve
@@ -144,6 +148,9 @@ its email in the dashboard. The runner uses the existing `httpx` dependency.
 - `SANDBOX_TOOLS.md`: complete tool usage and policy guide
 - `index.html`: dashboard, forms, and API integration
 - `test_backend.py`: API and sandbox verification
+- `llm_cache.py`: SQLite model-response cache and strict replay
+- `test_llm_cache.py`: cache and live-gateway replay tests
+- `LLM_CACHE.md`: step-by-step record/replay guide
 - `gemini_agent.py`: Gemini agent with gateway-only tool execution and approval polling
 - `test_gemini_agent.py`: offline Gemini contract and gateway integration tests
 - `GEMINI_SETUP.md`: step-by-step live connection instructions
