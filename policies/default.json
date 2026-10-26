@@ -1,0 +1,68 @@
+{
+  "name": "default-assistant",
+  "rules": [
+    {
+      "tool": "read_file",
+      "action": "allow",
+      "reason": null,
+      "when": {
+        "to_domain_in": null,
+        "path_prefix": null,
+        "max_size": null
+      }
+    },
+    {
+      "tool": "list_files",
+      "action": "allow",
+      "reason": null,
+      "when": {
+        "to_domain_in": null,
+        "path_prefix": null,
+        "max_size": null
+      }
+    },
+    {
+      "tool": "delete_file",
+      "action": "block",
+      "reason": "Deletion is not permitted",
+      "when": {
+        "to_domain_in": null,
+        "path_prefix": null,
+        "max_size": null
+      }
+    },
+    {
+      "tool": "send_email",
+      "action": "allow",
+      "reason": null,
+      "when": {
+        "to_domain_in": [
+          "ourcompany.com"
+        ],
+        "path_prefix": null,
+        "max_size": null
+      }
+    },
+    {
+      "tool": "send_email",
+      "action": "approve",
+      "reason": "External email needs approval",
+      "when": {
+        "to_domain_in": null,
+        "path_prefix": null,
+        "max_size": null
+      }
+    },
+    {
+      "tool": "run_command",
+      "action": "block",
+      "reason": null,
+      "when": {
+        "to_domain_in": null,
+        "path_prefix": null,
+        "max_size": null
+      }
+    }
+  ],
+  "default": "block"
+}

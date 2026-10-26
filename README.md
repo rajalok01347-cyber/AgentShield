@@ -2,9 +2,9 @@
 
 A FastAPI security gateway between AI agents and simulated tools.
 
-## Current milestone: backend and sandbox tools
+## Current milestone: sessions and ordered policies
 
-Implemented and tested: agent API-key authentication, SQLite policies, sandbox reads/deletes,
+Implemented and tested: agent API-key authentication, per-run sessions, ordered SQLite policies, sandbox reads/deletes,
 approval-gated sandbox email, input validation, an admin outbox, and hash-linked audit events.
 The connected web dashboard and early rule-based attack demo are also available. A Gemini tool-calling runner is implemented; live Gemini access requires your local API key.
 
@@ -46,13 +46,24 @@ The dashboard and API are served together, so no separate frontend server is req
 
 `GET /health` should return `{"status":"ok"}`.
 
+## Step 2b: start a session
+
+The dashboard automatically creates a session for the first sandbox action. **New session**
+starts a clean task. The Gemini runner creates a fresh session for every task automatically.
+
+For manual API calls, use `POST /api/sessions` with the Agent key, then copy its returned `id`.
+Include it as `session_id` in each action for the same task. Bearer authentication is supported;
+`x-api-key` is retained for the dashboard and older clients.
+
+See [SESSIONS_POLICIES.md](SESSIONS_POLICIES.md) for policy management and migration details.
+
 ## Step 3: read a sandbox file
 
 In `POST /api/actions`, choose **Try it out**, enter the Agent key in `x-api-key`,
 and use this body:
 
 ```json
-{"tool":"read_file","args":{"path":"report.txt"}}
+{"session_id":"YOUR_SESSION_ID","tool":"read_file","args":{"path":"report.txt"}}
 ```
 
 Expected: `status` is `executed`, and `result.content` contains the fake report.
@@ -63,7 +74,7 @@ The file is a database record, not a file on your computer.
 Use the same endpoint and key:
 
 ```json
-{"tool":"delete_file","args":{"path":"report.txt"}}
+{"session_id":"YOUR_SESSION_ID","tool":"delete_file","args":{"path":"report.txt"}}
 ```
 
 Expected: `status` is `blocked`. Read the report again to confirm it still exists.
@@ -72,7 +83,7 @@ The delete tool itself works; the default agent policy prevents it from running.
 ## Step 5: request and approve an email
 
 ```json
-{"tool":"send_email","args":{"to":"manager@acme.example","body":"Quarterly summary"}}
+{"session_id":"YOUR_SESSION_ID","tool":"send_email","args":{"to":"manager@acme.example","body":"Quarterly summary"}}
 ```
 
 Expected: `status` is `pending`. Copy the returned `id`.
@@ -89,7 +100,7 @@ Choose `reject` instead to prevent execution.
 .\.venv\Scripts\python.exe -m unittest -v test_backend
 ```
 
-The 10 tests use a separate temporary database. They cover authentication, validation,
+The 32 tests use separate temporary databases. They cover authentication, validation,
 read isolation, missing files, blocked deletion, sandbox deletion, approval/rejection,
 concurrent approvals, attack detection, demo comparison, and audit tampering.
 
@@ -115,7 +126,11 @@ its email in the dashboard. The runner uses the existing `httpx` dependency.
 
 ## Files
 
-- `app.py`: authentication, policy decisions, approvals, API routes, and audit chain
+- `app.py`: authentication, session storage, approvals, API routes, migration, and audit chain
+- `policy.py`: ordered policy evaluation and condition validation
+- `test_sessions_policy.py`: policy, session isolation, and migration tests
+- `PRD.md`: supplied target specification
+- `SESSIONS_POLICIES.md`: session and policy API guide
 - `sandbox.py`: simulated file and email tools
 - `index.html`: dashboard, forms, and API integration
 - `test_backend.py`: API and sandbox verification

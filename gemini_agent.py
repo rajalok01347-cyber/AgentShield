@@ -65,7 +65,7 @@ class Gemini:
 
 def request(gateway, method, path, key, **kwargs):
     try:
-        response = gateway.request(method, path, headers={'x-api-key': key}, **kwargs)
+        response = gateway.request(method, path, headers={'Authorization': 'Bearer ' + key}, **kwargs)
     except httpx.RequestError:
         raise AgentError('Gateway connection failed. The action may have been recorded; inspect the dashboard before submitting again.') from None
     if response.status_code == 401:
@@ -81,6 +81,9 @@ def run_agent(task, model, gateway, agent_key, *, max_rounds=12, max_tools=24,
               approval_timeout=300, poll_interval=2, report=print,
               clock=time.monotonic, sleep=time.sleep):
     """Keep Gemini history in memory; submit each model tool call once."""
+    session = request(gateway, 'POST', '/api/sessions', agent_key)
+    session_id = session['id']
+    report('Session: ' + session_id)
     history = [{'role': 'user', 'parts': [{'text': task}]}]
     used = 0
     for _ in range(max_rounds):
@@ -92,7 +95,7 @@ def run_agent(task, model, gateway, agent_key, *, max_rounds=12, max_tools=24,
             if not text.strip():
                 raise AgentError('Gemini returned neither tool calls nor an answer.')
             report('Gemini: ' + text)
-            return {'answer': text, 'tool_calls': used}
+            return {'answer': text, 'tool_calls': used, 'session_id':session_id}
         if used + len(calls) > max_tools:
             raise AgentError('Tool-call limit reached. No calls from this response were submitted.')
         # Validate the whole batch before submitting any of it.
@@ -105,7 +108,7 @@ def run_agent(task, model, gateway, agent_key, *, max_rounds=12, max_tools=24,
         for call in calls:
             used += 1
             outcome = request(gateway, 'POST', '/api/actions', agent_key,
-                              json={'tool': call['name'], 'args': call.get('args', {})})
+                              json={'session_id':session_id,'tool': call['name'], 'args': call.get('args', {})})
             report(call['name'] + ': ' + outcome['status'])
             if outcome['status'] == 'pending':
                 rid = outcome['id']

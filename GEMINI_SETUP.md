@@ -93,7 +93,7 @@ The dashboard's scripted ON/OFF demo remains the deterministic attack demonstrat
 .\.venv\Scripts\python.exe -m unittest discover -p "test_*.py" -v
 ```
 
-19 tests cover the backend and offline Gemini integration. Gemini responses are mocked;
+32 tests cover the backend and offline Gemini integration. Gemini responses are mocked;
 the gateway, authentication, approval state, and sandbox operations use the real application.
 Tests check ID/signature preservation, multiple calls, approval/rejection, timeout,
 agent-scoped status, limits, and sanitized API errors.
@@ -110,8 +110,8 @@ agent-scoped status, limits, and sanitized API errors.
   the configured model is unavailable. Raw provider error bodies are not printed.
 - Approval status is read using `GET /api/actions/{rid}` with the Agent key. Requests
   belonging to another identity return 404. `GET /api/agent` checks the Agent key first.
-- The prototype still uses one seeded agent identity, so its suspicious-document history
-  persists between CLI runs. Multi-agent provisioning and run-level policies come later.
+- The prototype still starts with one seeded agent identity. Each CLI task creates a new
+  session, so suspicious-document history is isolated between runs. Multi-agent provisioning comes later.
 - Live Gemini connectivity is unverified until a valid local key is supplied and a live task succeeds.
 
 ## Official references

@@ -18,14 +18,18 @@ class BackendTests(unittest.TestCase):
         self.agent = {'x-api-key': 'test-agent-key'}
         self.admin = {'x-admin-key': 'test-admin-key'}
         with app.db() as c:
-            for table in ('requests', 'events', 'outbox'):
+            for table in ('requests', 'events', 'outbox', 'sessions'):
                 c.execute('DELETE FROM '+table)
             c.execute("DELETE FROM files WHERE agent!='demo-agent'")
+            c.execute("DELETE FROM agents WHERE id!='demo-agent'")
+            c.execute("UPDATE agents SET policy_id='default-assistant' WHERE id='demo-agent'")
+            c.execute('UPDATE policies SET rules_json=? WHERE id=?',(app.DEFAULT_POLICY.model_dump_json(),'default-assistant'))
         (app.DATA/'checkpoint.json').unlink(missing_ok=True)
+        self.session = self.client.post('/api/sessions',headers=self.agent).json()['id']
 
     def action(self, tool, **args):
         return self.client.post('/api/actions', headers=self.agent,
-                                json={'tool': tool, 'args': args})
+                                json={'session_id':self.session,'tool': tool, 'args': args})
 
     def test_health_and_auth(self):
         self.assertEqual(self.client.get('/health').json(), {'status': 'ok'})

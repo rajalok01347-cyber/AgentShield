@@ -69,11 +69,11 @@ class GeminiTests(unittest.TestCase):
         self.assertEqual(self.client.get('/api/state',headers=self.admin).json()['requests'][0]['status'],'pending')
 
     def test_request_status_is_scoped_to_owner(self):
-        rid=self.client.post('/api/actions',headers=self.agent,json={'tool':'read_file','args':{'path':'report.txt'}}).json()['id']
+        rid=self.client.post('/api/actions',headers=self.agent,json={'session_id':self.session,'tool':'read_file','args':{'path':'report.txt'}}).json()['id']
         self.assertEqual(self.client.get('/api/actions/'+rid,headers=self.agent).status_code,200)
         self.assertEqual(self.client.get('/api/actions/'+rid,headers=self.admin).status_code,401)
         with backend.app.db() as c:
-            c.execute('INSERT OR REPLACE INTO requests VALUES(?,?,?,?,?,?,?)',('foreign','other','read_file','{}','executed','test','null'))
+            c.execute('INSERT OR REPLACE INTO requests(id,agent,tool,args,status,reason,result) VALUES(?,?,?,?,?,?,?)',('foreign','other','read_file','{}','executed','test','null'))
         self.assertEqual(self.client.get('/api/actions/foreign',headers=self.agent).status_code,404)
         self.assertEqual(self.client.get('/api/agent',headers=self.agent).json()['id'],'demo-agent')
 
