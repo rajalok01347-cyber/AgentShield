@@ -2,6 +2,9 @@
 import os
 import tempfile
 import unittest
+from pathlib import Path
+from unittest.mock import patch
+import sandbox
 from concurrent.futures import ThreadPoolExecutor
 
 _temp = tempfile.TemporaryDirectory()
@@ -14,16 +17,21 @@ import app
 
 class BackendTests(unittest.TestCase):
     def setUp(self):
+        directory=tempfile.TemporaryDirectory()
+        self.addCleanup(directory.cleanup)
+        root_patch=patch.object(sandbox,'ROOT',Path(directory.name)/'sandbox')
+        root_patch.start(); self.addCleanup(root_patch.stop)
         self.client = TestClient(app.app)
         self.agent = {'x-api-key': 'test-agent-key'}
         self.admin = {'x-admin-key': 'test-admin-key'}
         with app.db() as c:
-            for table in ('requests', 'events', 'outbox', 'sessions', 'destructive_attempts'):
+            for table in ('requests', 'events', 'outbox', 'sessions', 'destructive_attempts','trash','sandbox_agents'):
                 c.execute('DELETE FROM '+table)
-            c.execute("DELETE FROM files WHERE agent!='demo-agent'")
+            c.execute('DELETE FROM files')
             c.execute("DELETE FROM agents WHERE id!='demo-agent'")
             c.execute("UPDATE agents SET policy_id='default-assistant' WHERE id='demo-agent'")
             c.execute('UPDATE policies SET rules_json=? WHERE id=?',(app.DEFAULT_POLICY.model_dump_json(),'default-assistant'))
+            sandbox.seed_agent(c,'demo-agent')
         (app.DATA/'checkpoint.json').unlink(missing_ok=True)
         self.session = self.client.post('/api/sessions',headers=self.agent).json()['id']
 
@@ -76,7 +84,7 @@ class BackendTests(unittest.TestCase):
 
     def test_tools_are_scoped_to_agent(self):
         with app.db() as c:
-            c.execute("INSERT OR REPLACE INTO files VALUES ('other','private.txt','private')")
+            sandbox.put_file('other','private.txt','private')
         self.assertEqual(self.action('read_file',path='private.txt').status_code,404)
 
     def test_attack_sequence_and_audit_tamper(self):
@@ -94,9 +102,12 @@ class BackendTests(unittest.TestCase):
 
     def test_sandbox_delete_implementation(self):
         with app.db() as c:
-            c.execute("INSERT INTO files VALUES ('tool-test','disposable.txt','fake')")
+            sandbox.seed_agent(c,'tool-test')
+            sandbox.put_file('tool-test','disposable.txt','fake')
             result=app.execute(c,'tool-test',app.Action(tool='delete_file',args={'path':'disposable.txt'}))
-            self.assertEqual(result,{'deleted':'disposable.txt'})
+            self.assertEqual(result['deleted'],'disposable.txt')
+            self.assertTrue(result['recoverable'])
+            self.assertFalse(sandbox.safe_path('tool-test','disposable.txt').exists())
             self.assertIsNone(c.execute("SELECT 1 FROM files WHERE agent='tool-test'").fetchone())
 
 

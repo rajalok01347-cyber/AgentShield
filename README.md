@@ -2,9 +2,9 @@
 
 A FastAPI security gateway between AI agents and simulated tools.
 
-## Current milestone: session attack detector rules
+## Current milestone: full sandbox toolset
 
-Implemented and tested: agent API-key authentication, per-run sessions, ordered SQLite policies, sandbox reads/deletes,
+Implemented and tested: agent API-key authentication, per-run sessions, ordered SQLite policies, sandbox list/read/write/trash operations and canned commands,
 approval-gated sandbox email, input validation, an admin outbox, and hash-linked audit events.
 The connected web dashboard and early rule-based attack demo are also available. A Gemini tool-calling runner is implemented; live Gemini access requires your local API key.
 
@@ -67,7 +67,7 @@ and use this body:
 ```
 
 Expected: `status` is `executed`, and `result.content` contains the fake report.
-The file is a database record, not a file on your computer.
+The file is inside the agent’s isolated runtime sandbox; it is not one of your personal files.
 
 ## Step 4: try a blocked deletion
 
@@ -83,7 +83,7 @@ The delete tool itself works; the default agent policy prevents it from running.
 ## Step 5: request and approve an email
 
 ```json
-{"session_id":"YOUR_SESSION_ID","tool":"send_email","args":{"to":"manager@acme.example","body":"Quarterly summary"}}
+{"session_id":"YOUR_SESSION_ID","tool":"send_email","args":{"to":"manager@acme.example","subject":"Quarterly summary","body":"Quarterly summary"}}
 ```
 
 Expected: `status` is `pending`. Copy the returned `id`.
@@ -100,7 +100,7 @@ Choose `reject` instead to prevent execution.
 .\.venv\Scripts\python.exe -m unittest -v test_backend
 ```
 
-The 43 tests use separate temporary databases. They cover authentication, validation,
+The suite has 58 cases (57 pass, one host-dependent symlink case skipped), using temporary databases and sandbox folders. They cover authentication, validation,
 read isolation, missing files, blocked deletion, sandbox deletion, approval/rejection,
 concurrent approvals, attack detection, demo comparison, and audit tampering.
 
@@ -119,6 +119,10 @@ flowchart LR
  E --> I[Result + audit event]
 ```
 
+## Sandbox tools
+
+All six PRD tools are available. Follow [SANDBOX_TOOLS.md](SANDBOX_TOOLS.md) for file listing/writing, trash recovery, email subjects, and command simulation.
+
 ## Gemini agent
 
 Follow [GEMINI_SETUP.md](GEMINI_SETUP.md) to connect Gemini, run a task, and approve
@@ -134,7 +138,10 @@ its email in the dashboard. The runner uses the existing `httpx` dependency.
 - `test_sessions_policy.py`: policy, session isolation, and migration tests
 - `PRD.md`: supplied target specification
 - `SESSIONS_POLICIES.md`: session and policy API guide
-- `sandbox.py`: simulated file and email tools
+- `sandbox.py`: confined file tools, recoverable trash, fake email, and canned commands
+- `sandbox/`: tracked seed templates with fake data
+- `test_sandbox.py`: sandbox behavior, safety, and persistence tests
+- `SANDBOX_TOOLS.md`: complete tool usage and policy guide
 - `index.html`: dashboard, forms, and API integration
 - `test_backend.py`: API and sandbox verification
 - `gemini_agent.py`: Gemini agent with gateway-only tool execution and approval polling
@@ -144,7 +151,7 @@ its email in the dashboard. The runner uses the existing `httpx` dependency.
 
 ## Prototype boundaries
 
-- All file operations are database-only and scoped to the agent identity.
+- File operations are confined to a separate runtime folder per agent. See [SANDBOX_TOOLS.md](SANDBOX_TOOLS.md) for tools, policies, migration, and containment limits.
 - Agent policies are stored in SQLite. The current startup seeds one demo agent.
 - `GET /api/state` exposes requests and events to the admin key only.
 - Attack detection uses session taint, injection-phrase scanning, destructive-call burst

@@ -68,8 +68,7 @@ All specified conditions on a rule must match:
   strictly less than the limit. This counts recipient/path values as well as the body.
 
 Unknown conditions, invalid action names, non-positive size limits, and non-block defaults
-are rejected. Rules for future tools can be stored, but this milestone still exposes only
-read, delete, and email. Folder-based sandbox operations arrive with the full sandbox milestone.
+are rejected. Rules for future tools can be stored, but all six tools are now exposed. See [SANDBOX_TOOLS.md](SANDBOX_TOOLS.md) for the current tool milestone.
 
 New installations use `policies/default.json`. The source definition is in `policy.py`;
 the JSON file is a reviewable copy, not automatically reloaded. An internal email to
@@ -90,12 +89,11 @@ the admin assignment endpoint. Restarting does not overwrite edited policies or 
 
 ## Verification and remaining work
 
-43 tests cover the existing app, Gemini contract, policies, session isolation, approval-time
+58 test cases cover the existing app, Gemini contract, policies, session isolation, approval-time
 rechecks, and migration across repeated startups. The live browser check demonstrated that
 an external email is blocked in a tainted session and pending in a fresh session.
 
-This milestone does not finish the PRD. The complete sandbox toolset,
-full `/v1` API contract, record/replay cache, timeout expiry behavior, and final security docs/demo
+This milestone does not finish the PRD. The full `/v1` API contract, record/replay cache, timeout expiry behavior, and final security docs/demo
 rehearsals are still pending. Live Gemini connectivity still requires the user's local key.
 
 The detector milestone is now implemented; see [DETECTOR_RULES.md](DETECTOR_RULES.md).

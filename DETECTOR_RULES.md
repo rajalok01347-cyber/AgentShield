@@ -39,9 +39,8 @@ $env:AGENTSHIELD_BURST_LIMIT = "3"
 $env:AGENTSHIELD_BURST_WINDOW = "10"
 ```
 
-The current destructive tool is `delete_file`. The detector also reserves write/overwrite
-names for the future sandbox milestone. `http_post` is recognized as outbound internally
-but is not exposed as an API tool in this milestone. Neither future tool is claimed implemented.
+Deletes and `write_file` calls that overwrite an existing file are destructive. New file creation is not. Pending writes are checked again at approval and counted once by request ID. `http_post` is recognized as outbound internally
+but is not exposed as an API tool in this milestone. `http_post` remains unimplemented.
 
 The current submission is counted. Policy-blocked and failed sandbox-tool attempts count.
 Validation/authentication failures and unknown tools do not. Approval polling and human
@@ -85,4 +84,4 @@ These rules can have false positives (for example, a document discussing prompt 
 and false negatives (for example, obfuscated instructions, encoded secrets, unfamiliar
 credential formats, or exfiltration channels outside the exposed tools). The burst guard is
 per-session and uses the local wall clock; it is not an account-wide rate limiter. This remains
-a single-process local prototype. Completing the sandbox and record/replay demo are later milestones.
+a single-process local prototype. The full sandbox is now implemented; record/replay remains a later milestone.

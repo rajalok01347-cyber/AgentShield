@@ -53,19 +53,19 @@ def inspect_result(result):
     return None
 
 
-def record_attempt(connection, session_id, tool, now=None):
-    if tool in DESTRUCTIVE_TOOLS:
-        connection.execute('INSERT INTO destructive_attempts(session_id,tool,created_at) VALUES(?,?,?)',
-                           (session_id, tool, time.time() if now is None else now))
+def record_attempt(connection, session_id, tool, now=None, request_id=None, destructive=None):
+    if tool in DESTRUCTIVE_TOOLS and destructive is not False:
+        connection.execute('INSERT OR IGNORE INTO destructive_attempts(session_id,tool,created_at,request_id) VALUES(?,?,?,?)',
+                           (session_id,tool,time.time() if now is None else now,request_id))
 
 
-def inspect_action(connection, policy, session, action, now=None):
+def inspect_action(connection, policy, session, action, now=None, destructive=None):
     if action.tool in OUTBOUND_TOOLS:
         if any(pattern.search(normalized(text)) for text in strings(action.args) for pattern in SECRETS):
             return Finding('secret_in_outbound', 'Secret in outbound data: credential-like content detected')
         if session['tainted'] and email_domain(action.args.get('to')) not in outbound_domains(policy):
             return Finding('taint_exfiltration', 'Taint → exfiltration: untrusted content read, external recipient')
-    if action.tool in DESTRUCTIVE_TOOLS:
+    if action.tool in DESTRUCTIVE_TOOLS and destructive is not False:
         current = time.time() if now is None else now
         count = connection.execute('SELECT COUNT(*) FROM destructive_attempts WHERE session_id=? AND created_at>=? AND created_at<=?',
                                    (session['id'], current-BURST_WINDOW, current)).fetchone()[0]

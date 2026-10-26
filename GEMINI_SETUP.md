@@ -93,7 +93,7 @@ The dashboard's scripted ON/OFF demo remains the deterministic attack demonstrat
 .\.venv\Scripts\python.exe -m unittest discover -p "test_*.py" -v
 ```
 
-43 tests cover the backend and offline Gemini integration. Gemini responses are mocked;
+58 test cases cover the backend and offline Gemini integration. Gemini responses are mocked;
 the gateway, authentication, approval state, and sandbox operations use the real application.
 Tests check ID/signature preservation, multiple calls, approval/rejection, timeout,
 agent-scoped status, limits, and sanitized API errors.
