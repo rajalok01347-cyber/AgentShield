@@ -1,44 +1,146 @@
 # AgentShield
 
-A security gateway between AI agents and their tools.
+A FastAPI security gateway between AI agents and simulated tools.
 
-## Planned behavior
+## Current milestone: backend and sandbox tools
 
-- Identify agents using API keys and database policies.
-- Allow safe actions, block prohibited actions, and hold risky actions for human approval.
-- Detect suspicious sequences associated with prompt injection.
-- Record actions in a hash-linked audit log.
-- Demonstrate shield OFF versus ON using sandbox tools only.
+Implemented and tested: agent API-key authentication, SQLite policies, sandbox reads/deletes,
+approval-gated sandbox email, input validation, an admin outbox, and hash-linked audit events.
+The connected web dashboard and early rule-based attack demo are also available. A Gemini tool-calling runner is implemented; live Gemini access requires your local API key.
 
-## Project status
+## Step 1: install dependencies
 
-Early prototype. `app.py` contains initial FastAPI and SQLite gateway code.
-The dashboard, automated tests, and LLM integration are not yet complete.
-The application has not yet been run or verified. Do not deploy this prototype.
-
-## Planned stack
-
-Python, FastAPI, SQLite (Postgres later), and a web dashboard.
-
-## Files
-
-- `app.py`: initial gateway prototype and sandbox tool logic
-- `requirements.txt`: Python dependencies
-- `.gitignore`: excludes secrets, local data, and environments
-
-## Development setup
-
-Requires Python 3.10 or newer. From this directory in PowerShell:
+Requires Python 3.10 or newer. Open PowerShell in this project folder:
 
 ```powershell
 py -m venv .venv
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
 ```
 
-Once the dashboard is implemented, the intended launch command is:
+## Step 2: start the backend
 
 ```powershell
-.\.venv\Scripts\python.exe -m uvicorn app:app --reload --host 127.0.0.1
+.\.venv\Scripts\python.exe -m uvicorn app:app --host 127.0.0.1 --port 8000
 ```
 
-Keep API keys out of Git. All demo emails and file operations are simulated.
+The terminal prints a generated **Agent key** and **Dashboard key**. Keep them local.
+They change on restart unless you set `AGENTSHIELD_AGENT_KEY` and `AGENTSHIELD_ADMIN_KEY`
+in your environment before starting. Run one worker for this SQLite prototype.
+
+Open http://localhost:8000/ for the dashboard, or http://localhost:8000/docs for the API explorer.
+
+### Use the dashboard
+
+1. Paste the **Dashboard key** from the startup terminal and choose **Connect dashboard**.
+2. Paste the **Agent key** into **Try a sandbox action**. Submit a file read or an email.
+3. An email appears in **Approval inbox**. Review its recipient and body before choosing
+   **Approve & execute** or **Reject**.
+4. Inspect the **Action feed**, expand **View details**, and check the **Sandbox outbox**.
+5. Choose **Verify integrity** to compare the audit chain with the local checkpoint.
+6. Use **Run shield ON** and **Run shield OFF** to compare scripted sandbox attacks.
+7. Choose **Refresh** to load actions submitted elsewhere. This version does not poll automatically.
+8. Choose **Lock** to clear both keys and hide the workspace. Reloading also clears the keys.
+
+Keys are never embedded in the HTML, placed in URLs, or saved in browser storage.
+The dashboard and API are served together, so no separate frontend server is required.
+
+`GET /health` should return `{"status":"ok"}`.
+
+## Step 3: read a sandbox file
+
+In `POST /api/actions`, choose **Try it out**, enter the Agent key in `x-api-key`,
+and use this body:
+
+```json
+{"tool":"read_file","args":{"path":"report.txt"}}
+```
+
+Expected: `status` is `executed`, and `result.content` contains the fake report.
+The file is a database record, not a file on your computer.
+
+## Step 4: try a blocked deletion
+
+Use the same endpoint and key:
+
+```json
+{"tool":"delete_file","args":{"path":"report.txt"}}
+```
+
+Expected: `status` is `blocked`. Read the report again to confirm it still exists.
+The delete tool itself works; the default agent policy prevents it from running.
+
+## Step 5: request and approve an email
+
+```json
+{"tool":"send_email","args":{"to":"manager@acme.example","body":"Quarterly summary"}}
+```
+
+Expected: `status` is `pending`. Copy the returned `id`.
+Use `POST /api/approvals/{rid}/{decision}` with that ID, decision `approve`, and the
+Dashboard key in `x-admin-key`. Repeating the approval returns HTTP 409.
+
+Inspect `GET /api/outbox` with the Dashboard key. It contains one simulated email.
+No mail server, network request, or actual recipient is involved.
+Choose `reject` instead to prevent execution.
+
+## Step 6: run the tests
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest -v test_backend
+```
+
+The 10 tests use a separate temporary database. They cover authentication, validation,
+read isolation, missing files, blocked deletion, sandbox deletion, approval/rejection,
+concurrent approvals, attack detection, demo comparison, and audit tampering.
+
+## Backend flow
+
+```mermaid
+flowchart LR
+ A[Agent + API key] --> B[Validate request]
+ B --> C[Load database policy]
+ C --> D{Decision}
+ D -->|allow| E[Database sandbox tool]
+ D -->|block| F[Denial]
+ D -->|approval| G[Pending request]
+ G --> H[Admin decision]
+ H -->|approve once| E
+ E --> I[Result + audit event]
+```
+
+## Gemini agent
+
+Follow [GEMINI_SETUP.md](GEMINI_SETUP.md) to connect Gemini, run a task, and approve
+its email in the dashboard. The runner uses the existing `httpx` dependency.
+
+## Files
+
+- `app.py`: authentication, policy decisions, approvals, API routes, and audit chain
+- `sandbox.py`: simulated file and email tools
+- `index.html`: dashboard, forms, and API integration
+- `test_backend.py`: API and sandbox verification
+- `gemini_agent.py`: Gemini agent with gateway-only tool execution and approval polling
+- `test_gemini_agent.py`: offline Gemini contract and gateway integration tests
+- `GEMINI_SETUP.md`: step-by-step live connection instructions
+- `requirements.txt`: backend and test dependencies
+
+## Prototype boundaries
+
+- All file operations are database-only and scoped to the agent identity.
+- Agent policies are stored in SQLite. The current startup seeds one demo agent.
+- `GET /api/state` exposes requests and events to the admin key only.
+- Attack detection is a narrow demonstration rule based on reading `untrusted.txt`;
+  it is not a general prompt-injection detector.
+- `POST /api/demo` is admin-only; `{"shield":false}` bypasses policy only for a
+  fresh simulated demo identity. It cannot operate on real files or email.
+- `POST /api/demo/tamper` intentionally corrupts the local audit log for demonstrations.
+  Use a disposable data directory for this demo; it does not repair the history.
+- The local checkpoint can detect a removed log tail, but an attacker who controls
+  both the database and checkpoint can rewrite history. It is not an external trust anchor.
+- The checkpoint file and SQLite commit are not one atomic transaction. Crashes can
+  cause verification to fail. Failed validation/authentication and tool errors are not
+  yet included in the audit chain.
+- This is a local, single-process teaching prototype. Production hardening,
+  live Gemini verification, and multi-agent provisioning remain future work.
+
+Do not commit credentials or `data/`. These are excluded by `.gitignore`.
