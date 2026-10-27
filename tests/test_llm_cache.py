@@ -8,11 +8,11 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 import httpx
-import sandbox
+from agentshield import sandbox
 import test_backend as backend
 from test_gemini_agent import ScriptedModel, call, ANSWER
-from gemini_agent import Gemini, AgentError, run_agent, model_outcome, SYSTEM, TOOLS, main
-from llm_cache import LLMCache, CachedModel, CacheError, request_key, connection
+from agentshield.gemini_agent import Gemini, AgentError, run_agent, model_outcome, SYSTEM, TOOLS, main
+from agentshield.llm_cache import LLMCache, CachedModel, CacheError, request_key, connection
 
 
 class CacheTests(unittest.TestCase):
@@ -100,7 +100,7 @@ class CacheGatewayTests(unittest.TestCase):
         return CachedModel(provider,self.cache,mode,'test-model',SYSTEM,TOOLS,report=lambda _:None)
 
     def run_task(self,model,**kwargs):
-        return run_agent('Read the demo report.',model,self.client,'test-agent-key',report=lambda _:None,**kwargs)
+        return run_agent('Read the demo report.',model,self.client,backend.app.AGENT,report=lambda _:None,**kwargs)
 
     def test_full_record_replay_twice_uses_fresh_gateway_requests(self):
         provider=ScriptedModel(call('read_file',{'path':'report.txt'}),ANSWER)
@@ -141,7 +141,7 @@ class CacheGatewayTests(unittest.TestCase):
         self.assertEqual(len(self.client.get('/admin/trash',headers=self.admin).json()['files']),1)
 
     def test_cli_replay_does_not_prompt_for_gemini_key(self):
-        import gemini_agent
+        from agentshield import gemini_agent
         with patch.dict(os.environ,{'LLM_MODE':'replay','AGENTSHIELD_AGENT_KEY':'test-agent-key'},clear=False),patch('sys.argv',['gemini_agent.py','--cache-db',str(self.cache.path),'unrecorded task']),patch('getpass.getpass',side_effect=AssertionError('No key prompt in replay')),patch.object(gemini_agent.httpx,'Client',return_value=self.client) as clients,patch('builtins.print'):
             self.assertEqual(main(),1)
             self.assertEqual(clients.call_count,1)

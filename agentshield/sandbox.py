@@ -9,9 +9,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 from fastapi import HTTPException
 
-ROOT = Path(os.getenv('AGENTSHIELD_DATA', str(Path(__file__).parent/'data'))) / 'sandbox'
-SEEDS = Path(__file__).parent/'sandbox'
+PROJECT = Path(__file__).resolve().parent.parent
+ROOT = Path(os.getenv('AGENTSHIELD_DATA', str(PROJECT/'data'))) / 'sandbox'
+SEEDS = PROJECT/'sandbox'
 MAX_FILE_BYTES = 100_000
+# These seed files stand in for files that came from outside (downloads, inbound email).
+UNTRUSTED_FILES = frozenset({'untrusted.txt', 'meeting_notes.txt'})
 
 
 def validate_path(value, directory=False):
@@ -88,14 +91,6 @@ def seed_agent(connection,agent_id):
     if connection.execute('SELECT 1 FROM sandbox_agents WHERE agent=?',(agent_id,)).fetchone():
         return
     root=agent_root(agent_id)
-    # Import legacy content once, without overwriting any existing sandbox file.
-    for row in connection.execute('SELECT name,body FROM files WHERE agent=?',(agent_id,)).fetchall():
-        try:
-            path=validate_path(row['name'])
-        except ValueError:
-            continue
-        if not safe_path(agent_id,path).exists():
-            put_file(agent_id,path,row['body'])
     for source in sorted(SEEDS.iterdir()):
         if source.is_file() and not source.is_symlink() and not (root/source.name).exists():
             put_file(agent_id,source.name,source.read_text(encoding='utf-8-sig'))
@@ -137,7 +132,7 @@ def execute(connection,agent_id,action):
                 content=target.read_text(encoding='utf-8')
             except UnicodeDecodeError:
                 raise HTTPException(422,'Sandbox file is not UTF-8 text') from None
-            return {'content':content,'untrusted':args['path'] in ('untrusted.txt','meeting_notes.txt')}
+            return {'content':content,'untrusted':args['path'] in UNTRUSTED_FILES}
         trash_id=secrets.token_hex(16)
         stored=f'.trash/{trash_id}/{args["path"]}'
         destination=safe_path(agent_id,stored,internal=True)

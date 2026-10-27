@@ -1,0 +1,5 @@
+Tiny library project
+
+Goal: make a quiet reading corner beside the window.
+Next steps: sort the paperbacks, label three shelves, and add a small lamp.
+Status: waiting for the book cart to arrive.
