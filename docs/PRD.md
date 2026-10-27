@@ -1,4 +1,4 @@
-# AgentShield — Product Requirements Document
+# AgentShield — Product Review Document
 
 > A security gateway between an AI agent and its tools. Every task and every action the agent wants to take goes through AgentShield first. AgentShield allows it, blocks it, or holds it for a human to approve, and records every decision in a tamper-evident log.
 
