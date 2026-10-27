@@ -1,26 +1,45 @@
-import hashlib, hmac, json, os, secrets, sqlite3, threading
+import hashlib, hmac, json, os, secrets, shutil, sqlite3, threading
+from .env_config import load_env
+load_env()
 from pathlib import Path
 from datetime import datetime, timezone
 from typing import Literal
-from fastapi import FastAPI, Header, HTTPException, Depends
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, Header, HTTPException, Depends, Request
+from fastapi.responses import HTMLResponse
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+import httpx
 import re
 from contextlib import contextmanager
-from sandbox import execute, seed_agent, validate_path, restore, MAX_FILE_BYTES, safe_path
+from .sandbox import execute, seed_agent, validate_path, restore, MAX_FILE_BYTES, safe_path
 from pydantic import BaseModel, Field, ConfigDict, model_validator
-from policy import Policy, DEFAULT_POLICY, evaluate
-from detector import inspect_action, inspect_result, record_attempt, BURST_LIMIT, BURST_WINDOW
-ROOT = Path(__file__).parent
+from .policy import Policy, DEFAULT_POLICY, evaluate
+from .detector import inspect_action, inspect_result, inspect_task, record_attempt, BURST_LIMIT, BURST_WINDOW
+ROOT = Path(__file__).resolve().parent.parent
 DATA = Path(os.getenv('AGENTSHIELD_DATA', str(ROOT / 'data')))
 DATA.mkdir(parents=True, exist_ok=True)
 LOCK = threading.RLock()
-ADMIN = os.getenv('AGENTSHIELD_ADMIN_KEY') or secrets.token_urlsafe(24)
-AGENT = os.getenv('AGENTSHIELD_AGENT_KEY') or secrets.token_urlsafe(24)
-if not os.getenv('AGENTSHIELD_ADMIN_KEY'):
-    print('Dashboard key:', ADMIN)
-if not os.getenv('AGENTSHIELD_AGENT_KEY'):
-    print('Agent key:', AGENT)
+SHIELD_ENABLED = True
+KEYS_PATH = DATA / 'keys.json'
+
+def load_or_create_keys():
+    if KEYS_PATH.exists():
+        try:
+            values = json.loads(KEYS_PATH.read_text(encoding='utf-8'))
+            if all(isinstance(values.get(name), str) and len(values[name]) >= 32 for name in ('admin_key', 'agent_key')):
+                return values['admin_key'], values['agent_key']
+        except (OSError, ValueError):
+            pass
+        raise RuntimeError('Local data/keys.json is invalid; move it aside and restart to generate new local keys')
+    admin_key = os.getenv('AGENTSHIELD_ADMIN_KEY') or secrets.token_urlsafe(32)
+    agent_key = os.getenv('AGENTSHIELD_AGENT_KEY') or secrets.token_urlsafe(32)
+    temporary = KEYS_PATH.with_suffix('.json.tmp')
+    temporary.write_text(json.dumps({'admin_key': admin_key, 'agent_key': agent_key}, indent=2) + '\n', encoding='utf-8')
+    os.replace(temporary, KEYS_PATH)
+    return admin_key, agent_key
+
+ADMIN, AGENT = load_or_create_keys()
 app = FastAPI(title='AgentShield')
+app.add_middleware(TrustedHostMiddleware, allowed_hosts=['localhost', '127.0.0.1'])
 
 @contextmanager
 def db():
@@ -31,43 +50,46 @@ def db():
             yield c
     finally:
         c.close()
+DB_PATH = DATA / 'shield.db'
+if DB_PATH.exists():
+    existing = sqlite3.connect(DB_PATH)
+    try:
+        tables = {row[0] for row in existing.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+        agent_columns = {row[1] for row in existing.execute('PRAGMA table_info(agents)')}
+    finally:
+        existing.close()
+    if 'files' in tables or ('agents' in tables and 'policy_id' not in agent_columns):
+        raise RuntimeError('Old database found; delete the data folder and restart')
+
 with db() as c:
-    c.executescript('CREATE TABLE IF NOT EXISTS agents(id TEXT PRIMARY KEY,key_hash TEXT,policy TEXT); CREATE TABLE IF NOT EXISTS requests(id TEXT PRIMARY KEY,agent TEXT,tool TEXT,args TEXT,status TEXT,reason TEXT,result TEXT); CREATE TABLE IF NOT EXISTS events(seq INTEGER PRIMARY KEY,payload TEXT,prev TEXT,hash TEXT); CREATE TABLE IF NOT EXISTS files(agent TEXT,name TEXT,body TEXT,PRIMARY KEY(agent,name));')
-    c.execute('CREATE TABLE IF NOT EXISTS outbox(id INTEGER PRIMARY KEY,agent TEXT,recipient TEXT,body TEXT)')
-    for column, definition in [('subject', "TEXT NOT NULL DEFAULT ''"), ('sent_at', 'TEXT')]:
-        if column not in [r['name'] for r in c.execute('PRAGMA table_info(outbox)')]:
-            c.execute(f'ALTER TABLE outbox ADD COLUMN {column} {definition}')
-    c.executescript('CREATE TABLE IF NOT EXISTS sandbox_agents(agent TEXT PRIMARY KEY); CREATE TABLE IF NOT EXISTS trash(id TEXT PRIMARY KEY,agent TEXT,path TEXT,stored_path TEXT,deleted_at TEXT,status TEXT);')
-    c.executescript('CREATE TABLE IF NOT EXISTS policies(id TEXT PRIMARY KEY,name TEXT,rules_json TEXT); CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,agent_id TEXT NOT NULL,tainted INTEGER NOT NULL DEFAULT 0,started_at TEXT NOT NULL);')
-    if 'policy_id' not in [r['name'] for r in c.execute('PRAGMA table_info(agents)')]:
-        c.execute('ALTER TABLE agents ADD COLUMN policy_id TEXT')
-    if 'session_id' not in [r['name'] for r in c.execute('PRAGMA table_info(requests)')]:
-        c.execute('ALTER TABLE requests ADD COLUMN session_id TEXT')
-    c.execute('CREATE TABLE IF NOT EXISTS destructive_attempts(id INTEGER PRIMARY KEY,session_id TEXT NOT NULL,tool TEXT NOT NULL,created_at REAL NOT NULL)')
-    if 'request_id' not in [r['name'] for r in c.execute('PRAGMA table_info(destructive_attempts)')]:
-        c.execute('ALTER TABLE destructive_attempts ADD COLUMN request_id TEXT')
-    c.execute('CREATE UNIQUE INDEX IF NOT EXISTS idx_attempt_request ON destructive_attempts(request_id) WHERE request_id IS NOT NULL')
-    c.execute('CREATE INDEX IF NOT EXISTS idx_attempt_session_time ON destructive_attempts(session_id,created_at)')
-    if 'detector_rule' not in [r['name'] for r in c.execute('PRAGMA table_info(requests)')]:
-        c.execute('ALTER TABLE requests ADD COLUMN detector_rule TEXT')
+    c.executescript('''
+        CREATE TABLE IF NOT EXISTS agents(id TEXT PRIMARY KEY,key_hash TEXT NOT NULL,policy_id TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS requests(id TEXT PRIMARY KEY,agent TEXT NOT NULL,tool TEXT NOT NULL,args TEXT NOT NULL,status TEXT NOT NULL,reason TEXT,result TEXT,session_id TEXT,detector_rule TEXT);
+        CREATE TABLE IF NOT EXISTS events(seq INTEGER PRIMARY KEY,payload TEXT NOT NULL,prev TEXT NOT NULL,hash TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS outbox(id INTEGER PRIMARY KEY,agent TEXT,recipient TEXT,body TEXT,subject TEXT NOT NULL DEFAULT '',sent_at TEXT);
+        CREATE TABLE IF NOT EXISTS sandbox_agents(agent TEXT PRIMARY KEY);
+        CREATE TABLE IF NOT EXISTS trash(id TEXT PRIMARY KEY,agent TEXT,path TEXT,stored_path TEXT,deleted_at TEXT,status TEXT);
+        CREATE TABLE IF NOT EXISTS policies(id TEXT PRIMARY KEY,name TEXT,rules_json TEXT);
+        CREATE TABLE IF NOT EXISTS sessions(id TEXT PRIMARY KEY,agent_id TEXT NOT NULL,tainted INTEGER NOT NULL DEFAULT 0,started_at TEXT NOT NULL);
+        CREATE TABLE IF NOT EXISTS destructive_attempts(id INTEGER PRIMARY KEY,session_id TEXT NOT NULL,tool TEXT NOT NULL,created_at REAL NOT NULL,request_id TEXT);
+        CREATE TABLE IF NOT EXISTS agent_runs(id TEXT PRIMARY KEY,task TEXT NOT NULL,status TEXT NOT NULL,answer TEXT,error TEXT,progress_json TEXT NOT NULL,session_id TEXT,created_at TEXT NOT NULL,updated_at TEXT NOT NULL);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_attempt_request ON destructive_attempts(request_id) WHERE request_id IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_attempt_session_time ON destructive_attempts(session_id,created_at);
+    ''')
+    now = datetime.now(timezone.utc).isoformat()
+    for row in c.execute("SELECT id,progress_json FROM agent_runs WHERE status IN ('queued','running')").fetchall():
+        try:
+            progress = json.loads(row['progress_json'] or '[]')
+            if not isinstance(progress, list):
+                progress = []
+        except (TypeError, ValueError):
+            progress = []
+        progress.append({'time': now, 'message': 'Server restarted before this run completed.'})
+        c.execute("UPDATE agent_runs SET status='failed',error=?,progress_json=?,updated_at=? WHERE id=?",
+                  ('Server restarted while the run was active.', json.dumps(progress), now, row['id']))
     c.execute('INSERT OR IGNORE INTO policies VALUES(?,?,?)', ('default-assistant', DEFAULT_POLICY.name, DEFAULT_POLICY.model_dump_json()))
-    for old in c.execute('SELECT * FROM agents WHERE policy_id IS NULL').fetchall():
-        old_policy = json.loads(old['policy'])
-        migrated = Policy(name='Migrated ' + old['id'], rules=[{'tool': tool, 'action': 'approve' if mode == 'approval' else mode} for tool, mode in old_policy.items()])
-        pid = 'migrated-' + old['id']
-        c.execute('INSERT OR IGNORE INTO policies VALUES(?,?,?)', (pid, migrated.name, migrated.model_dump_json()))
-        c.execute('UPDATE agents SET policy_id=? WHERE id=?', (pid, old['id']))
-    c.execute('INSERT OR IGNORE INTO agents(id,key_hash,policy,policy_id) VALUES(?,?,?,?)', ('demo-agent', hashlib.sha256(AGENT.encode()).hexdigest(), '{}', 'default-assistant'))
+    c.execute('INSERT OR IGNORE INTO agents(id,key_hash,policy_id) VALUES(?,?,?)', ('demo-agent', hashlib.sha256(AGENT.encode()).hexdigest(), 'default-assistant'))
     c.execute('UPDATE agents SET key_hash=? WHERE id=?', (hashlib.sha256(AGENT.encode()).hexdigest(), 'demo-agent'))
-    for old in c.execute('SELECT DISTINCT agent FROM requests WHERE session_id IS NULL').fetchall():
-        sid = 'legacy-' + old['agent']
-        c.execute('INSERT OR IGNORE INTO sessions VALUES(?,?,0,?)', (sid, old['agent'], datetime.now(timezone.utc).isoformat()))
-        c.execute('UPDATE requests SET session_id=? WHERE agent=? AND session_id IS NULL', (sid, old['agent']))
-        reads = c.execute("SELECT args FROM requests WHERE session_id=? AND tool='read_file' AND status='executed'", (sid,)).fetchall()
-        if any((json.loads(r['args']).get('path') == 'untrusted.txt' for r in reads)):
-            c.execute('UPDATE sessions SET tainted=1 WHERE id=?', (sid,))
-    for orphan in c.execute('SELECT DISTINCT r.agent FROM requests r LEFT JOIN agents a ON a.id=r.agent WHERE a.id IS NULL').fetchall():
-        c.execute('INSERT INTO agents(id,key_hash,policy,policy_id) VALUES(?,?,?,?)', (orphan['agent'], secrets.token_hex(32), '{}', 'default-assistant'))
     for row in c.execute('SELECT id FROM agents').fetchall():
         seed_agent(c, row['id'])
 
@@ -162,7 +184,7 @@ def observe_result(c, who, sid, rid, result):
         log(c, 'detector_flag', request_id=rid, agent=who, session_id=sid, detector_rule=finding.rule, reason=finding.reason)
     return finding.rule if finding else None
 
-def submit(who, a, shield=True, policy_override=None):
+def submit(who, a, shield=None, policy_override=None):
     if not a.session_id:
         raise HTTPException(422, 'session_id is required; create a session first')
     with LOCK, db() as c:
@@ -171,7 +193,8 @@ def submit(who, a, shield=True, policy_override=None):
         rid = secrets.token_hex(8)
         destructive = a.tool == 'delete_file' or (a.tool == 'write_file' and safe_path(who, a.args['path']).is_file())
         record_attempt(c, a.session_id, a.tool, request_id=rid, destructive=destructive)
-        mode, reason, detector_rule = decide(c, policy, session, a, destructive=destructive) if shield else ('allow', 'Shield OFF: sandbox only', None)
+        enabled = SHIELD_ENABLED if shield is None else shield
+        mode, reason, detector_rule = decide(c, policy, session, a, destructive=destructive) if enabled else ('allow', 'Shield OFF: sandbox only', None)
         status = {'allow': 'executed', 'block': 'blocked', 'approve': 'pending'}[mode]
         log(c, 'action', request_id=rid, agent=who, session_id=a.session_id, tool=a.tool, args=a.args, status='allowed' if mode == 'allow' else status, decision=mode, reason=reason, detector_rule=detector_rule)
         error = None
@@ -192,7 +215,9 @@ def submit(who, a, shield=True, policy_override=None):
 
 @app.get('/')
 def index():
-    return FileResponse(ROOT / 'index.html', headers={'Cache-Control': 'no-store'})
+    source = (ROOT / 'web' / 'index.html').read_text(encoding='utf-8')
+    page = source.replace('__AGENTSHIELD_ADMIN_KEY__', json.dumps(ADMIN))
+    return HTMLResponse(page, headers={'Cache-Control': 'no-store', 'X-Content-Type-Options': 'nosniff'})
 
 @app.get('/health')
 def health():
@@ -203,6 +228,25 @@ def outbox():
     with db() as c:
         return {'messages': [dict(r) for r in c.execute('SELECT * FROM outbox ORDER BY id DESC')]}
 
+class ShieldSetting(BaseModel):
+    enabled: bool
+
+@app.get('/api/shield', dependencies=[Depends(admin)])
+def get_shield():
+    return {'enabled': SHIELD_ENABLED}
+
+@app.post('/api/shield', dependencies=[Depends(admin)])
+def set_shield(setting: ShieldSetting):
+    global SHIELD_ENABLED
+    with LOCK, db() as c:
+        previous = SHIELD_ENABLED
+        SHIELD_ENABLED = setting.enabled
+        if previous != SHIELD_ENABLED:
+            log(c, 'shield_toggled', enabled=SHIELD_ENABLED)
+            c.commit()
+            checkpoint(c)
+    return {'enabled': SHIELD_ENABLED}
+
 @app.post('/api/actions')
 def actions(a: Action, identity=Depends(agent)):
     return submit(identity['id'], a)
@@ -211,7 +255,7 @@ def actions(a: Action, identity=Depends(agent)):
 def agent_info(identity=Depends(agent)):
     with db() as c:
         policy = load_policy(c, identity['id'])
-    return {'id': identity['id'], 'policy': policy.model_dump()}
+    return {'id': identity['id'], 'policy': policy.model_dump(), 'shield_enabled': SHIELD_ENABLED}
 
 @app.get('/api/actions/{rid}')
 def action_status(rid: str, identity=Depends(agent)):
@@ -224,7 +268,111 @@ def action_status(rid: str, identity=Depends(agent)):
 @app.get('/api/state', dependencies=[Depends(admin)])
 def state():
     with db() as c:
-        return {'detector': {'burst_limit': BURST_LIMIT, 'burst_window': BURST_WINDOW}, 'requests': [dict(r) for r in c.execute('SELECT * FROM requests ORDER BY rowid DESC')], 'events': [dict(r) for r in c.execute('SELECT * FROM events ORDER BY seq DESC')], 'agents': [{'id': r['id'], 'policy_id': r['policy_id']} for r in c.execute('SELECT * FROM agents')], 'sessions': [dict(r) for r in c.execute('SELECT * FROM sessions ORDER BY started_at DESC')], 'policies': [{'id': r['id'], **json.loads(r['rules_json'])} for r in c.execute('SELECT * FROM policies')]}
+        return {'shield_enabled': SHIELD_ENABLED, 'detector': {'burst_limit': BURST_LIMIT, 'burst_window': BURST_WINDOW}, 'requests': [dict(r) for r in c.execute('SELECT * FROM requests ORDER BY rowid DESC')], 'events': [dict(r) for r in c.execute('SELECT * FROM events ORDER BY seq DESC')], 'agents': [{'id': r['id'], 'policy_id': r['policy_id']} for r in c.execute('SELECT * FROM agents')], 'sessions': [dict(r) for r in c.execute('SELECT * FROM sessions ORDER BY started_at DESC')], 'policies': [{'id': r['id'], **json.loads(r['rules_json'])} for r in c.execute('SELECT * FROM policies')], 'agent_runs': [dict(r) for r in c.execute('SELECT * FROM agent_runs ORDER BY created_at DESC LIMIT 20')]}
+
+class AgentTask(BaseModel):
+    task: str = Field(min_length=1, max_length=2000)
+
+def update_agent_run(run_id, *, status=None, answer=None, error=None, progress=None, session_id=None):
+    with LOCK, db() as c:
+        row = c.execute('SELECT progress_json FROM agent_runs WHERE id=?', (run_id,)).fetchone()
+        if row is None:
+            return
+        messages = json.loads(row['progress_json'])
+        if progress:
+            messages.append({'time': datetime.now(timezone.utc).isoformat(), 'message': str(progress)[:500]})
+            messages = messages[-100:]
+        values = {
+            'status': status,
+            'answer': answer,
+            'error': error,
+            'progress_json': json.dumps(messages),
+            'session_id': session_id,
+            'updated_at': datetime.now(timezone.utc).isoformat(),
+        }
+        c.execute('''UPDATE agent_runs SET
+            status=COALESCE(?,status), answer=COALESCE(?,answer), error=COALESCE(?,error),
+            progress_json=?, session_id=COALESCE(?,session_id), updated_at=? WHERE id=?''',
+            (values['status'], values['answer'], values['error'], values['progress_json'], values['session_id'], values['updated_at'], run_id))
+        c.commit()
+
+def run_agent_task(run_id, task, gateway_url):
+    update_agent_run(run_id, status='running', progress='Starting Gemini agent run')
+    try:
+        from .gemini_agent import Gemini, run_agent, SYSTEM, TOOLS, AgentError
+        from .llm_cache import LLMCache, CachedModel
+        mode = os.getenv('LLM_MODE', 'live').strip().lower()
+        model_name = os.getenv('GEMINI_MODEL', 'gemini-flash-latest')
+        api_key = os.getenv('GEMINI_API_KEY', '').strip()
+        if mode not in ('live', 'record', 'replay'):
+            raise AgentError('LLM_MODE must be live, record, or replay')
+        if mode != 'replay' and not api_key:
+            raise AgentError('Set GEMINI_API_KEY in .env before starting a live or record run.')
+        cache_path = os.getenv('LLM_CACHE_PATH') or str(DATA / 'shield.db')
+        cache = None if mode == 'live' else LLMCache(cache_path)
+        with httpx.Client(base_url=gateway_url, timeout=15, follow_redirects=False, trust_env=False) as gateway:
+            if mode == 'replay':
+                provider = None
+                model = CachedModel(provider, cache, mode, model_name, SYSTEM, TOOLS)
+                outcome = run_agent(task, model, gateway, AGENT, report=lambda msg: update_agent_run(run_id, progress=msg))
+            else:
+                with httpx.Client(timeout=60, follow_redirects=False) as google:
+                    provider = Gemini(google, api_key, model_name)
+                    model = CachedModel(provider, cache, mode, model_name, SYSTEM, TOOLS)
+                    outcome = run_agent(task, model, gateway, AGENT, report=lambda msg: update_agent_run(run_id, progress=msg))
+        update_agent_run(run_id, status='completed', answer=outcome['answer'], session_id=outcome['session_id'], progress='Task complete')
+    except Exception as exc:
+        update_agent_run(run_id, status='failed', error=str(exc)[:1000], progress='Run stopped')
+
+@app.post('/api/agent-runs', dependencies=[Depends(admin)])
+def start_agent_run(body: AgentTask, request: Request):
+    run_id = secrets.token_hex(12)
+    now = datetime.now(timezone.utc).isoformat()
+    task_text = body.task.strip()
+    if not task_text:
+        raise HTTPException(422, 'Task cannot be blank')
+    with LOCK, db() as c:
+        if c.execute("SELECT 1 FROM agent_runs WHERE status IN ('queued','running') LIMIT 1").fetchone():
+            raise HTTPException(409, 'An agent run is already active')
+        shield_enabled = SHIELD_ENABLED
+        finding = inspect_task(task_text, load_policy(c, 'demo-agent'))
+        blocked = shield_enabled and finding is not None
+        run_status = 'blocked' if blocked else 'queued'
+        error = finding.reason if blocked else None
+        progress = ([{'time': now, 'message': 'AgentShield blocked this task before it reached Gemini.'}]
+                    if blocked else [])
+        c.execute('INSERT INTO agent_runs(id,task,status,answer,error,progress_json,session_id,created_at,updated_at) VALUES(?,?,?,NULL,?,?,NULL,?,?)',
+                  (run_id, task_text, run_status, error, json.dumps(progress), now, now))
+        log(c, 'agent_task_blocked' if blocked else 'agent_task_forwarded', run_id=run_id,
+            shield_enabled=shield_enabled, task_sha256=hashlib.sha256(task_text.encode('utf-8')).hexdigest(),
+            detector_rule=finding.rule if finding else None, reason=finding.reason if blocked else None)
+        c.commit()
+        checkpoint(c)
+    if not blocked:
+        gateway_url = str(request.base_url).rstrip('/')
+        threading.Thread(target=run_agent_task, args=(run_id, task_text, gateway_url), daemon=True, name='agentshield-agent-'+run_id).start()
+    return {'id': run_id, 'status': run_status}
+
+@app.post('/api/demo/reset', dependencies=[Depends(admin)])
+def reset_demo():
+    global SHIELD_ENABLED
+    with LOCK, db() as c:
+        if c.execute("SELECT 1 FROM agent_runs WHERE status IN ('queued','running') LIMIT 1").fetchone():
+            raise HTTPException(409, 'Wait for the current agent run to finish before resetting the demo')
+        agents = [row['id'] for row in c.execute('SELECT id FROM agents')]
+        for table in ('requests', 'events', 'outbox', 'sessions', 'destructive_attempts', 'trash', 'sandbox_agents', 'agent_runs'):
+            c.execute('DELETE FROM '+table)
+        for agent_id in agents:
+            root = safe_path(agent_id, '', directory=True)
+            if root.exists():
+                shutil.rmtree(root)
+        for agent_id in agents:
+            seed_agent(c, agent_id)
+        SHIELD_ENABLED = True
+        log(c, 'demo_reset', scope='demo_data', prior_audit_cleared=True, shield_enabled=True)
+        c.commit()
+        checkpoint(c)
+    return {'status': 'reset', 'shield_enabled': True}
 
 @app.post('/api/approvals/{rid}/{decision}', dependencies=[Depends(admin)])
 def approve(rid: str, decision: Literal['approve', 'reject']):
@@ -283,7 +431,7 @@ def demo(options: Demo):
     who = 'demo-' + secrets.token_hex(4)
     with db() as c:
         seed_agent(c, who)
-        c.execute('INSERT INTO agents(id,key_hash,policy,policy_id) VALUES(?,?,?,?)', (who, secrets.token_hex(32), '{}', 'default-assistant'))
+        c.execute('INSERT INTO agents(id,key_hash,policy_id) VALUES(?,?,?)', (who, secrets.token_hex(32), 'default-assistant'))
         sid = create_session(c, who)
     policy = DEFAULT_POLICY
     steps = [Action(tool='read_file', args={'path': 'report.txt'}), Action(tool='delete_file', args={'path': 'report.txt'}), Action(tool='send_email', args={'to': 'manager@acme.example', 'body': 'Quarterly summary'}), Action(tool='read_file', args={'path': 'untrusted.txt'}), Action(tool='send_email', args={'to': 'thief@unknown.example', 'body': 'Internal revenue forecast: $420,000.'})]

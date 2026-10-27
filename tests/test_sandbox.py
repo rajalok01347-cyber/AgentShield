@@ -10,7 +10,7 @@ from types import SimpleNamespace
 from unittest.mock import patch
 from fastapi import HTTPException
 import test_backend as backend
-import sandbox
+from agentshield import sandbox
 
 
 class SandboxTests(unittest.TestCase):
@@ -130,17 +130,18 @@ class SandboxTests(unittest.TestCase):
             self.assertEqual(self.action(tool,**args).status_code,422)
         self.assertFalse(sandbox.safe_path('demo-agent','large.txt').exists())
 
-    def test_migration_preserves_files_and_deletion_across_restart(self):
+    def test_sandbox_files_and_trash_survive_restart(self):
         with tempfile.TemporaryDirectory() as directory:
             env=os.environ.copy();env['AGENTSHIELD_DATA']=directory
-            code="import app,sandbox; sandbox.put_file('demo-agent','report.txt','saved work'); c=app.sqlite3.connect(app.DATA/'shield.db'); c.row_factory=app.sqlite3.Row; sandbox.execute(c,'demo-agent',app.Action(tool='delete_file',args={'path':'customers.csv'})); c.commit(); c.close()"
+            code="from agentshield import app,sandbox; sandbox.put_file('demo-agent','report.txt','saved work'); c=app.sqlite3.connect(app.DATA/'shield.db'); c.row_factory=app.sqlite3.Row; sandbox.execute(c,'demo-agent',app.Action(tool='delete_file',args={'path':'customers.csv'})); c.commit(); c.close()"
             result=subprocess.run([sys.executable,'-c',code],cwd=str(backend.app.ROOT),env=env,capture_output=True,text=True,timeout=20)
             self.assertEqual(result.returncode,0,result.stderr)
-            check="import app,sandbox; assert sandbox.safe_path('demo-agent','report.txt').read_text()=='saved work'; assert not sandbox.safe_path('demo-agent','customers.csv').exists()"
+            check="from agentshield import app,sandbox; assert sandbox.safe_path('demo-agent','report.txt').read_text()=='saved work'; assert not sandbox.safe_path('demo-agent','customers.csv').exists(); c=app.sqlite3.connect(app.DATA/'shield.db'); assert c.execute(\"SELECT COUNT(*) FROM trash WHERE path='customers.csv' AND status='trashed'\").fetchone()[0]==1"
             result=subprocess.run([sys.executable,'-c',check],cwd=str(backend.app.ROOT),env=env,capture_output=True,text=True,timeout=20)
             self.assertEqual(result.returncode,0,result.stderr)
+
     def test_creation_does_not_count_as_destructive_but_overwrites_do(self):
-        import detector
+        from agentshield import detector
         self.allow('write_file','read_file')
         with patch.object(detector,'BURST_LIMIT',1),patch.object(detector,'BURST_WINDOW',3600):
             for i in range(4):
@@ -150,7 +151,7 @@ class SandboxTests(unittest.TestCase):
             self.assertEqual(self.action('read_file',path='new1.txt').json()['result']['content'],'original')
 
     def test_pending_creates_are_reclassified_when_approved_as_overwrites(self):
-        import detector
+        from agentshield import detector
         with backend.app.db() as c:
             c.execute('UPDATE policies SET rules_json=? WHERE id=?',(json.dumps({'name':'review','rules':[{'tool':'write_file','action':'approve'}]}),'default-assistant'))
         with patch.object(detector,'BURST_LIMIT',1),patch.object(detector,'BURST_WINDOW',3600):

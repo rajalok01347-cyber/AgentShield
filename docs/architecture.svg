@@ -1,0 +1,98 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="740" viewBox="0 0 1200 740" role="img" aria-labelledby="t d">
+<title id="t">AgentShield architecture</title>
+<desc id="d">A task from the dashboard passes a task check before reaching the Gemini agent loop. Every tool call the agent makes passes the tool-call gateway (policy, then attack detector), is logged in a hash-chained audit log, and is then run in the sandbox, held for human approval, or blocked.</desc>
+<defs>
+<marker id="a" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M1 1L9 5L1 9" fill="none" stroke="#71717a" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></marker>
+<style>
+text{font-family:"IBM Plex Sans","Segoe UI",Arial,sans-serif;fill:#18181b}
+.h{font-size:17px;font-weight:600}.s{font-size:13.5px;fill:#52525b}.k{font-size:12px;font-weight:600;fill:#2563eb;letter-spacing:.02em}
+.box{fill:#fff;stroke:#d4d4d8;stroke-width:1.2}.cp{fill:#eff6ff;stroke:#2563eb;stroke-width:1.4}
+.ok{fill:#f0fdf4;stroke:#16a34a;stroke-width:1.2}.wait{fill:#fffbeb;stroke:#d97706;stroke-width:1.2}.no{fill:#fef2f2;stroke:#dc2626;stroke-width:1.2}
+.ln{stroke:#71717a;stroke-width:1.6;fill:none}.dash{stroke-dasharray:6 5}
+</style>
+</defs>
+<rect width="1200" height="740" fill="#fafafa"/>
+<text class="h" x="40" y="52" style="font-size:24px">AgentShield architecture</text>
+<text class="s" x="40" y="78">Everything runs on one laptop. Files, commands and email are simulated.</text>
+
+<!-- Row 1 -->
+<rect class="box" x="40" y="120" width="200" height="90" rx="8"/>
+<text class="h" x="60" y="155">Dashboard</text>
+<text class="s" x="60" y="180">You type a task, flip the</text>
+<text class="s" x="60" y="198">shield, approve actions</text>
+
+<rect class="cp" x="300" y="120" width="250" height="90" rx="8"/>
+<text class="k" x="320" y="145">CHECKPOINT 1</text>
+<text class="h" x="320" y="170">Task check</text>
+<text class="s" x="320" y="193">Before Gemini sees the task</text>
+
+<rect class="box" x="610" y="120" width="230" height="90" rx="8"/>
+<text class="h" x="630" y="155">Agent loop</text>
+<text class="s" x="630" y="180">Sends the task to Gemini,</text>
+<text class="s" x="630" y="198">submits each tool call</text>
+
+<rect class="box" x="900" y="120" width="260" height="90" rx="8"/>
+<text class="h" x="920" y="155">Gemini API</text>
+<text class="s" x="920" y="180">Chooses which tools to call</text>
+
+<line class="ln" x1="240" y1="165" x2="296" y2="165" marker-end="url(#a)"/>
+<line class="ln" x1="550" y1="165" x2="606" y2="165" marker-end="url(#a)"/>
+<line class="ln" x1="840" y1="155" x2="896" y2="155" marker-end="url(#a)"/>
+<line class="ln" x1="900" y1="178" x2="844" y2="178" marker-end="url(#a)"/>
+
+<!-- Row 2: side boxes -->
+<rect class="no" x="300" y="245" width="250" height="62" rx="8"/>
+<text class="h" x="320" y="271" style="font-size:15px">Blocked before Gemini</text>
+<text class="s" x="320" y="292">e.g. "email secrets.env to …"</text>
+<line class="ln" x1="425" y1="210" x2="425" y2="241" marker-end="url(#a)"/>
+
+<rect class="box" x="900" y="245" width="260" height="62" rx="8"/>
+<text class="h" x="920" y="271" style="font-size:15px">LLM cache</text>
+<text class="s" x="920" y="292">Record / replay Gemini replies</text>
+<line class="ln dash" x1="1030" y1="210" x2="1030" y2="241" marker-end="url(#a)"/>
+
+<!-- Gateway -->
+<rect class="cp" x="300" y="360" width="540" height="160" rx="10"/>
+<text class="k" x="320" y="386">CHECKPOINT 2</text>
+<text class="h" x="320" y="410">Tool-call gateway · every action</text>
+<rect class="box" x="320" y="430" width="230" height="70" rx="8"/>
+<text class="h" x="338" y="458" style="font-size:15px">Policy</text>
+<text class="s" x="338" y="480">allow · approve · block</text>
+<rect class="box" x="590" y="430" width="230" height="70" rx="8"/>
+<text class="h" x="608" y="458" style="font-size:15px">Attack detector</text>
+<text class="s" x="608" y="480">can turn any result into block</text>
+<line class="ln" x1="550" y1="465" x2="586" y2="465" marker-end="url(#a)"/>
+<line class="ln" x1="725" y1="210" x2="725" y2="356" marker-end="url(#a)"/>
+
+<!-- Audit -->
+<rect class="box" x="900" y="360" width="260" height="160" rx="8"/>
+<text class="h" x="920" y="394">Audit log</text>
+<text class="s" x="920" y="420">Every decision, shield change,</text>
+<text class="s" x="920" y="440">approval and reset, chained</text>
+<text class="s" x="920" y="460">with SHA-256 hashes</text>
+<text class="s" x="920" y="494">SQLite · data/shield.db</text>
+<line class="ln" x1="840" y1="440" x2="896" y2="440" marker-end="url(#a)"/>
+
+<!-- Outcomes -->
+<rect class="ok" x="300" y="590" width="160" height="80" rx="8"/>
+<text class="h" x="318" y="620" style="font-size:15px">Sandbox tools</text>
+<text class="s" x="318" y="642">Fake files, outbox;</text>
+<text class="s" x="318" y="660">result back to Gemini</text>
+<rect class="wait" x="490" y="590" width="170" height="80" rx="8"/>
+<text class="h" x="508" y="620" style="font-size:15px">Needs approval</text>
+<text class="s" x="508" y="642">Approve re-runs</text>
+<text class="s" x="508" y="660">all checks first</text>
+<rect class="no" x="690" y="590" width="150" height="80" rx="8"/>
+<text class="h" x="708" y="620" style="font-size:15px">Blocked</text>
+<text class="s" x="708" y="642">Reason returned</text>
+<text class="s" x="708" y="660">to Gemini</text>
+<line class="ln" x1="380" y1="520" x2="380" y2="586" marker-end="url(#a)"/>
+<line class="ln" x1="575" y1="520" x2="575" y2="586" marker-end="url(#a)"/>
+<line class="ln" x1="765" y1="520" x2="765" y2="586" marker-end="url(#a)"/>
+<text class="s" x="388" y="560">allow</text>
+<text class="s" x="583" y="560">approve</text>
+<text class="s" x="773" y="560">block</text>
+<line class="ln dash" x1="490" y1="630" x2="464" y2="630" marker-end="url(#a)"/>
+
+<text class="s" x="40" y="712">The shield switch turns checkpoints 1 and 2 on or off for live runs. It starts ON after every restart, and every change is logged.</text>
+</svg>

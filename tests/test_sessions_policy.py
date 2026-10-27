@@ -8,7 +8,7 @@ import tempfile
 import unittest
 from pydantic import ValidationError
 import test_backend as backend
-from policy import Conditions, Policy, Rule, evaluate
+from agentshield.policy import Conditions, Policy, Rule, evaluate
 
 
 class PolicyTests(unittest.TestCase):
@@ -66,7 +66,7 @@ class SessionTests(unittest.TestCase):
             self.assertEqual(self.client.get('/api/sessions/'+sid,headers=self.agent).status_code,404)
 
     def test_bearer_auth_and_default_policy(self):
-        headers={'Authorization':'Bearer test-agent-key'}
+        headers={'Authorization':'Bearer '+os.environ['AGENTSHIELD_AGENT_KEY']}
         self.assertEqual(self.client.post('/v1/sessions',headers=headers).status_code,200)
         result=self.submit(self.session,'send_email',to='boss@ourcompany.com',body='hello').json()
         self.assertEqual(result['status'],'executed')
@@ -103,22 +103,12 @@ class SessionTests(unittest.TestCase):
         self.assertEqual(payload['args'],{'path':'report.txt'})
         self.assertEqual(state['requests'][0]['session_id'],self.session)
 
-    def test_old_database_migrates_and_keeps_policy_on_restart(self):
+    def test_old_database_requires_a_clean_data_folder(self):
         with tempfile.TemporaryDirectory() as directory:
             with closing(sqlite3.connect(os.path.join(directory,'shield.db'))) as c:
-                c.executescript('CREATE TABLE agents(id TEXT PRIMARY KEY,key_hash TEXT,policy TEXT); CREATE TABLE requests(id TEXT PRIMARY KEY,agent TEXT,tool TEXT,args TEXT,status TEXT,reason TEXT,result TEXT);')
-                c.execute('INSERT INTO agents VALUES(?,?,?)',('demo-agent','old',json.dumps({'read_file':'allow','send_email':'approval'})))
-                c.execute('INSERT INTO requests VALUES(?,?,?,?,?,?,?)',('old','demo-agent','read_file',json.dumps({'path':'untrusted.txt'}),'executed','old',json.dumps({'content':'old'})))
-                c.execute('INSERT INTO requests VALUES(?,?,?,?,?,?,?)',('old-demo','demo-orphan','send_email','{}','pending','old','null'))
+                c.execute('CREATE TABLE files(agent TEXT,name TEXT,body TEXT)')
                 c.commit()
             env=os.environ.copy();env['AGENTSHIELD_DATA']=directory
-            root=str(backend.app.ROOT)
-            for _ in range(2):
-                result=subprocess.run([sys.executable,'-c','import app'],cwd=root,env=env,capture_output=True,text=True,timeout=20)
-                self.assertEqual(result.returncode,0,result.stderr)
-            with closing(sqlite3.connect(os.path.join(directory,'shield.db'))) as c:
-                self.assertEqual(c.execute("SELECT policy_id FROM agents WHERE id='demo-agent'").fetchone()[0],'migrated-demo-agent')
-                self.assertEqual(c.execute("SELECT tainted FROM sessions WHERE id='legacy-demo-agent'").fetchone()[0],1)
-                self.assertEqual(c.execute("SELECT session_id FROM requests WHERE id='old'").fetchone()[0],'legacy-demo-agent')
-                self.assertEqual(c.execute('SELECT COUNT(*) FROM requests').fetchone()[0],2)
-                self.assertEqual(c.execute("SELECT policy_id FROM agents WHERE id='demo-orphan'").fetchone()[0],'default-assistant')
+            result=subprocess.run([sys.executable,'-c','from agentshield import app'],cwd=str(backend.app.ROOT),env=env,capture_output=True,text=True,timeout=20)
+            self.assertNotEqual(result.returncode,0)
+            self.assertIn('Old database found; delete the data folder and restart',result.stderr)

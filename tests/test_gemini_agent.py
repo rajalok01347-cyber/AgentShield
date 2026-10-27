@@ -3,7 +3,7 @@ import copy
 import unittest
 import httpx
 import test_backend as backend
-from gemini_agent import AgentError, Gemini, run_agent
+from agentshield.gemini_agent import AgentError, Gemini, run_agent
 
 
 class ScriptedModel:
@@ -29,7 +29,7 @@ class GeminiTests(unittest.TestCase):
         backend.BackendTests.setUp(self)
 
     def run_model(self, model, **kwargs):
-        return run_agent('test task',model,self.client,'test-agent-key',report=lambda _:None,**kwargs)
+        return run_agent('test task',model,self.client,backend.app.AGENT,report=lambda _:None,**kwargs)
 
     def test_read_and_blocked_delete_return_to_model(self):
         first=call('read_file',{'path':'report.txt'})

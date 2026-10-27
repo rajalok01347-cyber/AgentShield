@@ -1,14 +1,20 @@
 """Gemini tool-calling runner. All actions go through AgentShield over HTTP."""
 import argparse
 import getpass
+import json
 import os
 import re
 import time
 from pathlib import Path
 from contextlib import ExitStack
-from llm_cache import LLMCache, CachedModel, CacheError
+from .llm_cache import LLMCache, CachedModel, CacheError
 
 import httpx
+from .env_config import load_env
+
+load_env()
+
+PROJECT = Path(__file__).resolve().parent.parent
 
 TOOLS = [
     {'name':'list_files','description':'List immediate entries inside a sandbox folder. Use . for the root.','parameters':{'type':'object','properties':{'dir':{'type':'string'}},'required':['dir']}},
@@ -152,14 +158,21 @@ def main():
     parser.add_argument('--model', default=os.getenv('GEMINI_MODEL', 'gemini-flash-latest'))
     parser.add_argument('--approval-timeout', type=int, default=300)
     parser.add_argument('--llm-mode',choices=['live','record','replay'],default=os.getenv('LLM_MODE','live'))
-    parser.add_argument('--cache-db',default=os.getenv('LLM_CACHE_PATH',str(Path(os.getenv('AGENTSHIELD_DATA',str(Path(__file__).parent/'data')))/'shield.db')))
+    parser.add_argument('--cache-db',default=os.getenv('LLM_CACHE_PATH',str(Path(os.getenv('AGENTSHIELD_DATA',str(PROJECT/'data')))/'shield.db')))
     options = parser.parse_args()
     if options.llm_mode not in ('live','record','replay'):
         parser.error('LLM_MODE must be live, record, or replay')
     if not 1 <= options.approval_timeout <= 3600:
         parser.error('--approval-timeout must be between 1 and 3600 seconds')
     gemini_key = '' if options.llm_mode=='replay' else (os.getenv('GEMINI_API_KEY') or getpass.getpass('Gemini API key (hidden): '))
-    agent_key = os.getenv('AGENTSHIELD_AGENT_KEY') or getpass.getpass('AgentShield Agent key (hidden): ')
+    agent_key = os.getenv('AGENTSHIELD_AGENT_KEY')
+    if not agent_key:
+        keys_path=Path(os.getenv('AGENTSHIELD_DATA',str(PROJECT/'data')))/'keys.json'
+        try:
+            agent_key=json.loads(keys_path.read_text(encoding='utf-8')).get('agent_key','')
+        except (OSError,ValueError):
+            agent_key=''
+    agent_key = agent_key or getpass.getpass('AgentShield Agent key (hidden): ')
     if (options.llm_mode!='replay' and not gemini_key.strip()) or not agent_key.strip():
         parser.error('Both keys are required.')
     print('LLM mode: '+options.llm_mode)
@@ -169,7 +182,8 @@ def main():
         # Replay never constructs a provider client. Credentials stay in separate clients.
         with ExitStack() as stack:
             gateway=stack.enter_context(httpx.Client(base_url='http://127.0.0.1:8000',timeout=15,follow_redirects=False,trust_env=False))
-            request(gateway,'GET','/api/agent',agent_key)
+            agent_info=request(gateway,'GET','/api/agent',agent_key)
+            print('Shield: '+('ON' if agent_info.get('shield_enabled',True) else 'OFF'))
             provider=None
             if options.llm_mode!='replay':
                 google=stack.enter_context(httpx.Client(timeout=60,follow_redirects=False))

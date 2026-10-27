@@ -1,179 +1,205 @@
 # AgentShield
 
-A FastAPI security gateway between AI agents and simulated tools.
+AgentShield is a security gateway that sits between an AI agent (Gemini) and the tools it can use. The agent never touches a tool directly: every task and every tool call goes through AgentShield first. Safe actions run, dangerous ones are blocked, risky ones wait for a human, and every decision is written to a tamper-evident audit log.
 
-## Current milestone: LLM record/replay cache
+Everything is local and simulated. The agent works on fake files in a sandbox folder, "sends" email into a local outbox, and its commands never run.
 
-Implemented and tested: agent API-key authentication, per-run sessions, ordered SQLite policies, sandbox list/read/write/trash operations and canned commands,
-approval-gated sandbox email, input validation, an admin outbox, and hash-linked audit events.
-The connected web dashboard and early rule-based attack demo are also available. A Gemini tool-calling runner is implemented; live Gemini access requires your local API key.
+## How it works
 
-## Step 1: install dependencies
+AgentShield checks the agent at two points:
 
-Requires Python 3.10 or newer. Open PowerShell in this project folder:
+1. **Before Gemini sees the task** (`POST /api/agent-runs`). A task that plainly asks to email a sensitive file (such as `secrets.env`) to an outside address is blocked here, and Gemini is never called.
+2. **On every tool call** (`POST /api/actions`). For each action Gemini asks for, AgentShield:
+   - checks the agent's **policy**: allow, block, or wait for approval;
+   - runs the **attack detector**, which can turn any decision into a block;
+   - writes the decision to the **audit log**;
+   - runs the tool in the **sandbox** if it was allowed, or holds it for **human approval**.
 
-```powershell
-py -m venv .venv
-.\.venv\Scripts\python.exe -m pip install -r requirements.txt
-```
-
-## Step 2: start the backend
-
-```powershell
-.\.venv\Scripts\python.exe -m uvicorn app:app --host 127.0.0.1 --port 8000
-```
-
-The terminal prints a generated **Agent key** and **Dashboard key**. Keep them local.
-They change on restart unless you set `AGENTSHIELD_AGENT_KEY` and `AGENTSHIELD_ADMIN_KEY`
-in your environment before starting. Run one worker for this SQLite prototype.
-
-Open http://localhost:8000/ for the dashboard, or http://localhost:8000/docs for the API explorer.
-
-### Use the dashboard
-
-1. Paste the **Dashboard key** from the startup terminal and choose **Connect dashboard**.
-2. Paste the **Agent key** into **Try a sandbox action**. Submit a file read or an email.
-3. An email appears in **Approval inbox**. Review its recipient and body before choosing
-   **Approve & execute** or **Reject**.
-4. Inspect the **Action feed**, expand **View details**, and check the **Sandbox outbox**.
-5. Choose **Verify integrity** to compare the audit chain with the local checkpoint.
-6. Use **Run shield ON** and **Run shield OFF** to compare scripted sandbox attacks.
-7. Choose **Refresh** to load actions submitted elsewhere. This version does not poll automatically.
-8. Choose **Lock** to clear both keys and hide the workspace. Reloading also clears the keys.
-
-Keys are never embedded in the HTML, placed in URLs, or saved in browser storage.
-The dashboard and API are served together, so no separate frontend server is required.
-
-`GET /health` should return `{"status":"ok"}`.
-
-## Step 2b: start a session
-
-The dashboard automatically creates a session for the first sandbox action. **New session**
-starts a clean task. The Gemini runner creates a fresh session for every task automatically.
-
-For manual API calls, use `POST /api/sessions` with the Agent key, then copy its returned `id`.
-Include it as `session_id` in each action for the same task. Bearer authentication is supported;
-`x-api-key` is retained for the dashboard and older clients.
-
-See [SESSIONS_POLICIES.md](SESSIONS_POLICIES.md) for policy management and migration details.
-
-## Step 3: read a sandbox file
-
-In `POST /api/actions`, choose **Try it out**, enter the Agent key in `x-api-key`,
-and use this body:
-
-```json
-{"session_id":"YOUR_SESSION_ID","tool":"read_file","args":{"path":"report.txt"}}
-```
-
-Expected: `status` is `executed`, and `result.content` contains the fake report.
-The file is inside the agent’s isolated runtime sandbox; it is not one of your personal files.
-
-## Step 4: try a blocked deletion
-
-Use the same endpoint and key:
-
-```json
-{"session_id":"YOUR_SESSION_ID","tool":"delete_file","args":{"path":"report.txt"}}
-```
-
-Expected: `status` is `blocked`. Read the report again to confirm it still exists.
-The delete tool itself works; the default agent policy prevents it from running.
-
-## Step 5: request and approve an email
-
-```json
-{"session_id":"YOUR_SESSION_ID","tool":"send_email","args":{"to":"manager@acme.example","subject":"Quarterly summary","body":"Quarterly summary"}}
-```
-
-Expected: `status` is `pending`. Copy the returned `id`.
-Use `POST /api/approvals/{rid}/{decision}` with that ID, decision `approve`, and the
-Dashboard key in `x-admin-key`. Repeating the approval returns HTTP 409.
-
-Inspect `GET /api/outbox` with the Dashboard key. It contains one simulated email.
-No mail server, network request, or actual recipient is involved.
-Choose `reject` instead to prevent execution.
-
-## Step 6: run the tests
-
-```powershell
-.\.venv\Scripts\python.exe -m unittest -v test_backend
-```
-
-The suite has 70 cases (69 pass, one host-dependent symlink case skipped), using temporary databases and sandbox folders. They cover authentication, validation,
-read isolation, missing files, blocked deletion, sandbox deletion, approval/rejection,
-concurrent approvals, attack detection, demo comparison, and audit tampering.
-
-## Backend flow
+The **shield** switch on the dashboard turns both checkpoints on or off, so you can show the same attack with and without protection.
 
 ```mermaid
 flowchart LR
- A[Agent + API key] --> B[Validate request]
- B --> C[Load database policy]
- C --> D{Decision}
- D -->|allow| E[Database sandbox tool]
- D -->|block| F[Denial]
- D -->|approval| G[Pending request]
- G --> H[Admin decision]
- H -->|approve once| E
- E --> I[Result + audit event]
+  User[Dashboard task] --> TaskShield{Shield on?}
+  TaskShield -->|off| Gemini[Gemini agent]
+  TaskShield -->|on| TaskCheck{Task preflight}
+  TaskCheck -->|blocked| Stop[Stop before Gemini]
+  TaskCheck -->|forwarded| Gemini
+  Gemini -->|tool request| Gateway[AgentShield gateway]
+  Gateway --> ActionShield{Shield on?}
+  ActionShield -->|off| Sandbox[Sandbox tool]
+  ActionShield -->|on| Policy[Policy check]
+  Policy --> Detector[Attack detector]
+  Detector -->|allow| Sandbox
+  Detector -->|block| Block[Block with reason]
+  Detector -->|approval required| Human[Human approval]
+  Human -->|approved; recheck| Policy
+  Gateway --> Audit[Hash-chained audit log]
+  Sandbox -->|result| Gemini
 ```
 
-## Sandbox tools
+## Quick start (Windows)
 
-All six PRD tools are available. Follow [SANDBOX_TOOLS.md](SANDBOX_TOOLS.md) for file listing/writing, trash recovery, email subjects, and command simulation.
+1. Get a Gemini API key from [Google AI Studio](https://aistudio.google.com/apikey).
+2. Open PowerShell in this folder and run:
 
-## LLM record/replay
+   ```powershell
+   .\start.ps1
+   ```
 
-Set `LLM_MODE=live`, `record`, or `replay`. Only Gemini responses are cached; all gateway actions remain live. Follow [LLM_CACHE.md](LLM_CACHE.md) for recording, replay, cache misses, and approval rehearsal.
+   If Windows blocks scripts, use `powershell -ExecutionPolicy Bypass -File .\start.ps1`.
+3. The first run creates `.env` from `.env.example`. Put your key in it, then run `.\start.ps1` again:
 
-## Gemini agent
+   ```ini
+   GEMINI_API_KEY=your-key-here
+   LLM_MODE=record
+   GEMINI_MODEL=gemini-flash-lite-latest
+   ```
 
-Follow [GEMINI_SETUP.md](GEMINI_SETUP.md) to connect Gemini, run a task, and approve
-its email in the dashboard. The runner uses the existing `httpx` dependency.
+`start.ps1` creates `.venv`, installs the pinned requirements, starts the server on `http://127.0.0.1:8000` and opens the dashboard, which connects by itself. Running it again restarts the server so code changes load. Stop it with:
 
-## Files
+```powershell
+.\stop.ps1
+```
 
-- `app.py`: authentication, session storage, approvals, API routes, migration, and audit chain
-- `policy.py`: ordered policy evaluation and condition validation
-- `detector.py`: output scanning, outbound secret checks, and session burst limits
-- `test_detector.py`: detector integration and boundary tests
-- `DETECTOR_RULES.md`: rule definitions, configuration, and verification steps
-- `test_sessions_policy.py`: policy, session isolation, and migration tests
-- `PRD.md`: supplied target specification
-- `SESSIONS_POLICIES.md`: session and policy API guide
-- `sandbox.py`: confined file tools, recoverable trash, fake email, and canned commands
-- `sandbox/`: tracked seed templates with fake data
-- `test_sandbox.py`: sandbox behavior, safety, and persistence tests
-- `SANDBOX_TOOLS.md`: complete tool usage and policy guide
-- `index.html`: dashboard, forms, and API integration
-- `test_backend.py`: API and sandbox verification
-- `llm_cache.py`: SQLite model-response cache and strict replay
-- `test_llm_cache.py`: cache and live-gateway replay tests
-- `LLM_CACHE.md`: step-by-step record/replay guide
-- `gemini_agent.py`: Gemini agent with gateway-only tool execution and approval polling
-- `test_gemini_agent.py`: offline Gemini contract and gateway integration tests
-- `GEMINI_SETUP.md`: step-by-step live connection instructions
-- `requirements.txt`: backend and test dependencies
+You never copy keys by hand. The first start creates the Dashboard and Agent keys and saves them in `data/keys.json`, which Git ignores. The Gemini key only lives in `.env`, which Git also ignores.
 
-## Prototype boundaries
+`gemini-flash-lite-latest` is recommended: in testing, `gemini-flash-latest` sometimes took over 60 seconds to reply, and the run timed out.
 
-- File operations are confined to a separate runtime folder per agent. See [SANDBOX_TOOLS.md](SANDBOX_TOOLS.md) for tools, policies, migration, and containment limits.
-- Agent policies are stored in SQLite. The current startup seeds one demo agent.
-- `GET /api/state` exposes requests and events to the admin key only.
-- Attack detection uses session taint, injection-phrase scanning, destructive-call burst
-  limits, and outbound secret patterns. See [DETECTOR_RULES.md](DETECTOR_RULES.md) for
-  triggers, configuration, known false positives, and limits.
-- `POST /api/demo` is admin-only; `{"shield":false}` bypasses policy only for a
-  fresh simulated demo identity. It cannot operate on real files or email.
-- `POST /api/demo/tamper` intentionally corrupts the local audit log for demonstrations.
-  Use a disposable data directory for this demo; it does not repair the history.
-- The local checkpoint can detect a removed log tail, but an attacker who controls
-  both the database and checkpoint can rewrite history. It is not an external trust anchor.
-- The checkpoint file and SQLite commit are not one atomic transaction. Crashes can
-  cause verification to fail. Failed validation/authentication is not
-  yet included in the audit chain; sandbox-tool failures are recorded.
-- This is a local, single-process teaching prototype. Production hardening,
-  live Gemini verification, and multi-agent provisioning remain future work.
+## The dashboard
 
-Do not commit credentials or `data/`. These are excluded by `.gitignore`.
+| Area | What it does |
+|---|---|
+| **Shield switch** (top right) | Turns protection on or off for live agent runs. Starts ON after every restart. A red banner shows while it is off. Every change is logged. |
+| **Reset** (top right) | Restores the sandbox files, clears actions and approvals, and turns the shield on. Use it before each demo run. |
+| **Ask the agent** | Type a task or click a preset. Progress and Gemini's final answer appear under the box. |
+| **Needs approval** | Actions waiting for you, with their full arguments and **Approve** / **Reject** buttons. |
+| **Action feed** | Every tool call: time, tool, target, decision and reason. |
+| **Audit log** | The hash-chained event log, with **Verify** and **Tamper** buttons. |
+
+The outbox panel and the **Advanced tools** section (manual actions, policies, trash, scripted demo) are hidden in this version. Their API endpoints still work.
+
+The page refreshes every two seconds.
+
+## Presentation script
+
+Say first: *"The AI never touches tools directly. Every action goes through AgentShield first."*
+
+1. Click **Reset**.
+2. **Normal task** ("Summarize meeting_notes.txt"): the agent reads the file (green, *executed*) and shows a summary.
+3. **Delete file**: `delete_file` is blocked (red): "Deletion is not permitted."
+4. **Email partner** (summary of `report.txt` to `partner@example.test`): the email waits under **Needs approval**. Click **Approve** and the action feed shows it executed.
+5. **Attack demo, shield ON**: the task asks for `secrets.env` to be emailed to `attacker@evil.example`. AgentShield blocks it **before it reaches Gemini**.
+6. **Attack demo, shield OFF**: switch the shield off and run it again. The task is forwarded to Gemini. Gemini may still refuse on its own; if it complies, the action feed shows `send_email` to the attacker as *executed*.
+7. **Audit log**: click **Verify** (valid), then **Tamper**, then **Verify** again (broken).
+
+Record each step once in `record` mode, then switch `.env` to `LLM_MODE=replay` and restart for the real presentation. Say so: *"Gemini's replies are replayed for reliability; every security decision is made live."*
+
+## What the agent can access
+
+Only the files in `sandbox/`. Each agent works on its own copy in `data/sandbox/<id>/`, so the originals are never changed, and **Reset** makes fresh copies.
+
+| File | Contents |
+|---|---|
+| `report.txt` | One line of fake revenue data |
+| `customers.csv` | Two fake customers |
+| `secrets.env` | A fake API key and password, the "secret" to steal |
+| `meeting_notes.txt` | Meeting notes with a hidden malicious instruction (**untrusted**) |
+| `untrusted.txt` | A short attack instruction (**untrusted**) |
+| `file1.txt` – `file5.txt` | Harmless notes (trip, garden, space facts, soup recipe, library project) for free-form tasks |
+
+Reading an **untrusted** file marks the session as tainted.
+
+### Tools and the default policy
+
+| Tool | What it really does | Default policy |
+|---|---|---|
+| `list_files` | Lists sandbox files | Allowed |
+| `read_file` | Reads a sandbox file | Allowed |
+| `send_email` | Adds a row to the local outbox; nothing is delivered | Allowed to `@ourcompany.com`, otherwise **needs approval** |
+| `delete_file` | Moves the file to a recoverable trash | **Blocked** |
+| `write_file` | Writes inside the sandbox | **Blocked** (no rule allows it) |
+| `run_command` | Returns fixed fake text; never runs anything | **Blocked** |
+
+Rules are checked in order and the first match wins. Anything that matches no rule is blocked. Approving a request runs the policy and detector checks again before the action executes.
+
+### Attack detector
+
+| Rule | When it fires | Effect |
+|---|---|---|
+| `task_exfiltration` | The task itself asks to email/send a sensitive-looking file (for example `secrets.env`, passwords, API keys) to an outside address | Task blocked before Gemini |
+| `injection_phrases` | A tool result contains phrases like "ignore previous instructions", "you are now", or "send … to someone@…" | Session marked tainted |
+| `untrusted_content` | The agent reads a file marked untrusted | Session marked tainted |
+| `taint_exfiltration` | A tainted session tries to email an outside address | Blocked |
+| `secret_in_outbound` | An outgoing email contains `API_KEY=`, `password:` or an `sk-…` key | Blocked, even to internal addresses |
+| `destructive_burst` | More than 3 deletes/overwrites within 10 seconds in one session | Blocked |
+
+These are simple, explainable rules, not a complete defence. See [docs/SECURITY.md](docs/SECURITY.md) for their limits.
+
+## Record and replay
+
+| `LLM_MODE` | Gemini | Cache |
+|---|---|---|
+| `live` | Called every time | Not used |
+| `record` | Called every time | Each reply is saved |
+| `replay` | Never called | Saved replies only; a missing reply stops the run with an error |
+
+Only Gemini's replies are cached. Policy, detector, approval and audit decisions always run live. A replay matches only if the task, model and sandbox state are the same as when it was recorded, so click **Reset** before recording and before presenting. The cache lives in `data/shield.db`. **Reset** keeps it; deleting `data/` removes it, together with the local keys.
+
+## Project structure
+
+```text
+AgentShield/
+├── agentshield/            Python backend (one package)
+│   ├── app.py              FastAPI server: routes, sessions, approvals, shield, agent runs, audit log
+│   ├── policy.py           Ordered policy rules
+│   ├── detector.py         Attack detector rules
+│   ├── sandbox.py          Fake tools confined to the sandbox folder
+│   ├── gemini_agent.py     Gemini tool-calling loop (also runs from the command line)
+│   ├── llm_cache.py        Record/replay cache
+│   └── env_config.py       Loads .env
+├── web/index.html          Dashboard
+├── sandbox/                Fake seed files the agent works on
+├── policies/default.json   Readable copy of the default policy
+├── tests/                  Automated tests
+├── docs/                   PRD.md, SECURITY.md, architecture.svg
+├── start.ps1, stop.ps1     Start and stop the local server
+├── requirements.txt
+└── .env.example            Copy to .env and add your Gemini key
+```
+
+`data/` (created on first start, ignored by Git) holds the database, the local keys, the agent's working copies of the sandbox files, and the server logs.
+
+To run the agent from a terminal instead of the dashboard, with the server running:
+
+```powershell
+.\.venv\Scripts\python.exe -m agentshield.gemini_agent "Summarize meeting_notes.txt"
+```
+
+## API
+
+| Method | Path | Who | Purpose |
+|---|---|---|---|
+| `POST` | `/api/agent-runs` | Dashboard | Check a task and, if allowed, start a Gemini run |
+| `POST` | `/api/sessions` | Agent | Start a session |
+| `POST` | `/api/actions` | Agent | Submit a tool call; returns `executed`, `blocked`, `pending` or `error` |
+| `GET` | `/api/actions/{id}` | Agent | Check a pending request |
+| `POST` | `/api/approvals/{id}/approve` or `/reject` | Dashboard | Human decision |
+| `GET` / `POST` | `/api/shield` | Dashboard | Read or change the shield |
+| `GET` | `/api/state` | Dashboard | Actions, runs, sessions, policies and audit events |
+| `GET` | `/api/verify` | Dashboard | Check the audit chain |
+| `POST` | `/api/demo/reset`, `/api/demo/tamper` | Dashboard | Demo helpers |
+| `GET` / `POST` | `/admin/policies` | Dashboard | View or change policies |
+
+The full interactive list is at `http://127.0.0.1:8000/docs`.
+
+## Tests
+
+```powershell
+.\.venv\Scripts\python.exe -m unittest discover -s tests -v
+```
+
+80 tests cover the API, local-only access, saved keys, the shield, Reset, agent runs, the task check, policies, the detector, sandbox isolation, approvals, the audit chain and record/replay. Gemini is faked in the tests, so they need no API key or internet. One symlink test is skipped on Windows accounts without permission to create symlinks.
+
+## Local-only
+
+The dashboard key is placed in the page so it connects without a login. That is only safe because the server listens on `127.0.0.1` and rejects any other host name. Never expose this server to a network.

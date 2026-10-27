@@ -4,7 +4,7 @@ import re
 import time
 import unicodedata
 from dataclasses import dataclass
-from policy import email_domain, outbound_domains
+from .policy import email_domain, outbound_domains
 
 BURST_LIMIT = int(os.getenv('AGENTSHIELD_BURST_LIMIT', '3'))
 BURST_WINDOW = float(os.getenv('AGENTSHIELD_BURST_WINDOW', '10'))
@@ -15,13 +15,16 @@ OUTBOUND_TOOLS = {'send_email', 'http_post'}
 INJECTION = [
     re.compile(r'\bignore\s+(?:all\s+)?(?:previous|prior)\s+instructions\b', re.I),
     re.compile(r'\byou\s+are\s+now\b', re.I),
-    re.compile(r'\bsend\b.{1,200}?\bto\b', re.I),
+    re.compile(r'\bsend\b.{1,200}?\bto\s+[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b', re.I),
 ]
 SECRETS = [
     re.compile(r'\bAPI_KEY\s*=', re.I),
     re.compile(r'\bpassword\s*:', re.I),
     re.compile(r'\bsk-[a-z0-9_-]{8,}\b', re.I),
 ]
+TASK_SENSITIVE = re.compile(r'\b(?:secrets?\.env|credentials?(?:\.txt)?|passwords?|api[ _-]?keys?)\b', re.I)
+TASK_OUTBOUND = re.compile(r'\b(?:email|send|forward|share|upload|exfiltrate)\b', re.I)
+TASK_EMAIL = re.compile(r'\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b', re.I)
 
 
 @dataclass(frozen=True)
@@ -50,6 +53,17 @@ def inspect_result(result):
         return Finding('injection_phrases', 'Injection phrases: suspicious instructions found in tool output')
     if isinstance(result, dict) and result.get('untrusted'):
         return Finding('untrusted_content', 'Untrusted content: tool result marked this session tainted')
+    return None
+
+
+def inspect_task(task, policy):
+    """Catch explicit requests to send sensitive-looking sandbox files externally before Gemini sees them."""
+    text = normalized(task)
+    if not TASK_SENSITIVE.search(text) or not TASK_OUTBOUND.search(text):
+        return None
+    allowed = outbound_domains(policy)
+    if any(email_domain(address) not in allowed for address in TASK_EMAIL.findall(text)):
+        return Finding('task_exfiltration', 'Task requests sending a sensitive-looking file to an external email address')
     return None
 
 
